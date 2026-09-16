@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:everywhere}",
+            "name": "Debug Everywhere",
+            "target": "Everywhere",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug Everywhere"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:everywhere}",
+            "name": "Release Everywhere",
+            "target": "Everywhere",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release Everywhere"
+        }
+    ]
+}

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Everywhere</title>
+  <desc id="desc">A white search lens containing three file index lines forming an E, on a rounded blue macOS app tile.</desc>
+  <defs>
+    <linearGradient id="tile" x1="180" y1="100" x2="830" y2="950" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#39C7F3"/><stop offset=".46" stop-color="#167CF0"/><stop offset="1" stop-color="#2944CA"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="300" y1="220" x2="720" y2="790" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#D7EDFF"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="340" y1="280" x2="610" y2="650" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B6EDFF" stop-opacity=".3"/><stop offset="1" stop-color="#66BFFF" stop-opacity=".06"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="512" y1="65" x2="512" y2="950" gradientUnits="userSpaceOnUse">
+      <stop stop-color="white" stop-opacity=".5"/><stop offset=".5" stop-color="white" stop-opacity=".04"/><stop offset="1" stop-color="#102E92" stop-opacity=".3"/>
+    </linearGradient>
+  </defs>
+  <!-- Transparent outer margin; all artwork is editable vector geometry. -->
+  <rect x="64" y="77" width="896" height="896" rx="202" fill="#10275E" opacity=".10"/>
+  <rect x="64" y="64" width="896" height="896" rx="202" fill="url(#tile)"/>
+  <rect x="66" y="66" width="892" height="892" rx="200" stroke="url(#edge)" stroke-width="4"/>
+  <!-- Search symbol shadow. -->
+  <g stroke="#103798" stroke-opacity=".24" stroke-linecap="round" transform="translate(0 14)">
+    <path d="M622 626L770 774" stroke-width="88"/>
+    <circle cx="465" cy="465" r="222" stroke-width="59"/>
+  </g>
+  <circle cx="465" cy="465" r="220" fill="url(#glass)"/>
+  <path d="M622 622L770 770" stroke="url(#rim)" stroke-width="84" stroke-linecap="round"/>
+  <circle cx="465" cy="465" r="222" stroke="url(#rim)" stroke-width="58"/>
+  <!-- Three indexed rows suggest both a filename list and the initial E. -->
+  <g fill="#FFFFFF">
+    <rect x="350" y="350" width="40" height="40" rx="10"/>
+    <rect x="413" y="350" width="166" height="40" rx="20"/>
+    <rect x="350" y="445" width="40" height="40" rx="10"/>
+    <rect x="413" y="445" width="127" height="40" rx="20"/>
+    <rect x="350" y="540" width="40" height="40" rx="10"/>
+    <rect x="413" y="540" width="166" height="40" rx="20"/>
+  </g>
+</svg>
