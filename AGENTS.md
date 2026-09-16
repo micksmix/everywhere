@@ -58,7 +58,7 @@ make app       # builds .build/Everywhere.app (signed ad-hoc, bundles icon)
 make install   # + copies to /Applications
 make dist      # universal release zip + SHA256 for the GitHub release/tap
 make bump VERSION=x.y.z
-make release VERSION=x.y.z  # test, bump, tag, gh release, update tap cask
+make release VERSION=x.y.z  # test, bump, tag; CI publishes the release and updates the tap
 make open      # install + launch
 make run       # debug run from CLI
 make clean

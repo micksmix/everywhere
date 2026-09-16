@@ -2,6 +2,10 @@
 
 [Project overview and installation](../README.md)
 
+The Homebrew release includes native Apple Silicon (ARM64) and Intel (x86_64)
+binaries in one app for macOS 13 or later. Maintainers can find the automated
+build and tap setup in [How to release](../README.md#how-to-release).
+
 Choose **Help → Everywhere Help** or press **⌘?** to open this guide in macOS Help Viewer.
 The installed app includes offline help, installation information, performance notes,
 and the Apache License 2.0 text. When running with `make run`, Help opens the online guide.
