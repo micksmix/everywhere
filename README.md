@@ -235,6 +235,43 @@ documents, so documentation changes ship with the app. `make run` opens the onli
 **Everywhere → About Everywhere** shows the Apache License 2.0 license and a link to
 [the project on GitHub](https://github.com/micksmix/everywhere).
 
+## How to release
+
+A release is a `v`-tagged commit with a zip of the app attached to a GitHub release;
+the Homebrew tap serves that zip to users. One command runs the whole pipeline:
+
+```sh
+make release VERSION=1.0.0
+```
+
+The target performs these steps in order:
+
+1. Refuses to run if the `Makefile` has uncommitted changes, the GitHub CLI is
+   missing, or the tap cask is not found.
+2. Runs the test suite; a failure stops the release.
+3. Sets the version in the Makefile (`make bump VERSION=1.0.0`).
+4. Builds the universal binary and bundles it as `.build/Everywhere-1.0.0.zip`,
+   printing the zip's SHA256.
+5. Commits the Makefile as `v1.0.0`, tags `v1.0.0`, and pushes the tag.
+6. Publishes GitHub release `v1.0.0` with the zip attached and auto-generated notes.
+7. Updates `Casks/everywhere.rb` in `micksmix/homebrew-tap` with the matching
+   version and SHA256, then commits and pushes the tap.
+
+Finish by pushing the main branch, which the target deliberately leaves to you:
+
+```sh
+git push
+```
+
+Verify through Homebrew: `brew install --cask micksmix/tap/everywhere` (or
+`brew upgrade` for existing installs); `brew livecheck everywhere` follows each
+new release automatically.
+
+Prerequisites: the tap repo must exist at `micksmix/homebrew-tap`, and `gh`
+must be authenticated with an account that has push access to this repository
+(check with `gh auth status`). To change the version without releasing, use
+`make bump VERSION=1.0.0`.
+
 ## Credits
 
 Everywhere was inspired by two excellent instant-search tools: [Everything](https://www.voidtools.com/)
