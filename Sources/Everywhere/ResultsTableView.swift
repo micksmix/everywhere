@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Quartz
 import UniformTypeIdentifiers
 import EverywhereCore
 
@@ -50,6 +51,11 @@ struct ResultsTableView: NSViewRepresentable {
         table.action = #selector(Coordinator.singleClicked(_:))
         table.doubleAction = #selector(Coordinator.doubleClicked(_:))
         table.onEnter = { [weak viewModel] in viewModel?.openSelection() }
+        table.previewItems = { [weak viewModel] in viewModel?.selectedEntries ?? [] }
+        viewModel.previewSelection = { [weak table, weak viewModel] in
+            viewModel?.rememberSearch()
+            table?.togglePreview()
+        }
         table.menu = context.coordinator.makeContextMenu()
 
         let scroll = NSScrollView()
@@ -71,6 +77,7 @@ struct ResultsTableView: NSViewRepresentable {
         private var lastResults: [Entry] = []
         private var lastSelection: Set<Int64> = []
         private var lastSortKey = ""
+        private var lastHighlightRequest = SearchRequest()
 
         private static let iconCache = NSCache<NSString, NSImage>()
 
@@ -101,13 +108,18 @@ struct ResultsTableView: NSViewRepresentable {
             let columnID = column.identifier.rawValue
 
             if let cell = tableView.makeView(withIdentifier: column.identifier, owner: self) as? NSTableCellView {
-                cell.textField?.stringValue = Self.displayText(for: entry, columnID: columnID)
+                cell.textField?.attributedStringValue = highlightedText(for: entry, columnID: columnID)
                 if columnID == "name" { cell.imageView?.image = Self.icon(for: entry) }
                 return cell
             }
 
             let text = NSTextField(labelWithString: Self.displayText(for: entry, columnID: columnID))
+            text.attributedStringValue = highlightedText(for: entry, columnID: columnID)
             text.lineBreakMode = .byTruncatingMiddle
+            text.maximumNumberOfLines = 1
+            text.cell?.wraps = false
+            text.cell?.isScrollable = false
+            text.cell?.usesSingleLineMode = true
             text.translatesAutoresizingMaskIntoConstraints = false
             text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             if columnID == "path" {
@@ -150,10 +162,24 @@ struct ResultsTableView: NSViewRepresentable {
             guard let table = notification.object as? NSTableView else { return }
             lastSelection = selectedIDs(in: table)
             viewModel.selection = lastSelection
+            (table as? FSTableView)?.refreshPreview()
         }
 
         func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
             viewModel.apply(sortDescriptors: tableView.sortDescriptors)
+        }
+
+        private func highlightedText(for entry: Entry, columnID: String) -> NSAttributedString {
+            let value = Self.displayText(for: entry, columnID: columnID)
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byTruncatingMiddle
+            paragraph.alignment = columnID == "size" || columnID == "modified" ? .right : .left
+            let result = NSMutableAttributedString(string: value, attributes: [.paragraphStyle: paragraph])
+            guard columnID == "name" || columnID == "path" else { return result }
+            for range in SearchHighlights.ranges(in: value, request: viewModel.displayedRequest, path: columnID == "path") {
+                result.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize), range: range)
+            }
+            return result
         }
 
         static func displayText(for entry: Entry, columnID: String) -> String {
@@ -233,6 +259,10 @@ struct ResultsTableView: NSViewRepresentable {
             reveal.target = self
             menu.addItem(reveal)
 
+            let preview = NSMenuItem(title: "Quick Look", action: #selector(previewFromMenu(_:)), keyEquivalent: "")
+            preview.target = self
+            menu.addItem(preview)
+
             let info = NSMenuItem(title: "Get Info", action: #selector(showInfoFromMenu(_:)), keyEquivalent: "")
             info.target = self
             menu.addItem(info)
@@ -305,6 +335,13 @@ struct ResultsTableView: NSViewRepresentable {
             NSWorkspace.shared.activateFileViewerSelecting(urls)
         }
 
+        @objc private func previewFromMenu(_ sender: Any?) {
+            guard let table = tableView else { return }
+            let targets = targetEntries()
+            viewModel.selection = Set(targets.map(\.id))
+            table.togglePreview(entries: targets)
+        }
+
         @objc private func showInfoFromMenu(_ sender: Any?) {
             viewModel.showInfo(targetEntries())
         }
@@ -340,7 +377,8 @@ struct ResultsTableView: NSViewRepresentable {
                 table.sortDescriptors = viewModel.sortDescriptors
             }
 
-            if lastResults != viewModel.results {
+            if lastResults != viewModel.results || lastHighlightRequest != viewModel.displayedRequest {
+                lastHighlightRequest = viewModel.displayedRequest
                 let previouslySelected = viewModel.selection
                 lastResults = viewModel.results
                 table.reloadData()
@@ -350,6 +388,7 @@ struct ResultsTableView: NSViewRepresentable {
                 }
                 table.selectRowIndexes(indexes, byExtendingSelection: false)
                 lastSelection = selectedIDs(in: table)
+                table.refreshPreview()
             }
             let desired = IndexSet(viewModel.results.indices.filter { viewModel.selection.contains(viewModel.results[$0].id) })
             if table.selectedRowIndexes != desired {
@@ -359,10 +398,62 @@ struct ResultsTableView: NSViewRepresentable {
     }
 }
 
-final class FSTableView: NSTableView {
+final class FSTableView: NSTableView, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
+    var previewItems: (() -> [Entry])?
+    private var previewURLs: [NSURL] = []
+    private weak var previewPanel: QLPreviewPanel?
+
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
+
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        previewPanel = panel
+        panel.dataSource = self
+        panel.delegate = self
+    }
+
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.dataSource = nil
+        panel.delegate = nil
+        previewPanel = nil
+    }
+
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { previewURLs.count }
+
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
+        guard previewURLs.indices.contains(index) else { return nil }
+        return previewURLs[index]
+    }
+
+    func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
+        guard event.type == .keyDown else { return false }
+        if [49, 53].contains(event.keyCode) { panel.orderOut(nil); return true }
+        if [125, 126].contains(event.keyCode) { keyDown(with: event); return true }
+        return false
+    }
+
+    func togglePreview(entries: [Entry]? = nil) {
+        if let panel = previewPanel, panel.isVisible { panel.orderOut(nil); return }
+        previewURLs = (entries ?? previewItems?() ?? []).map { NSURL(fileURLWithPath: $0.path) }
+        guard !previewURLs.isEmpty, let panel = QLPreviewPanel.shared() else { return }
+        window?.makeFirstResponder(self)
+        panel.updateController()
+        panel.reloadData()
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    func refreshPreview() {
+        guard let panel = previewPanel, panel.isVisible else { return }
+        previewURLs = (previewItems?() ?? []).map { NSURL(fileURLWithPath: $0.path) }
+        if previewURLs.isEmpty { panel.orderOut(nil) } else { panel.reloadData() }
+    }
+
     var onEnter: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 49 && event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty {
+            togglePreview()
+            return
+        }
         if event.keyCode == 36 || event.keyCode == 76 {
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.function)
             if modifiers.isEmpty {

@@ -4,6 +4,8 @@ import SwiftUI
 struct SearchField: NSViewRepresentable {
     @Binding var text: String
     var focusToken: Int
+    var onHistory: (Bool) -> Void
+    var onEndEditing: () -> Void
     var onSubmit: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -43,7 +45,15 @@ struct SearchField: NSViewRepresentable {
             parent.text = field.stringValue
         }
 
+        func controlTextDidEndEditing(_ notification: Notification) {
+            parent.onEndEditing()
+        }
+
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.moveUp(_:)) || commandSelector == #selector(NSResponder.moveDown(_:)) {
+                parent.onHistory(commandSelector == #selector(NSResponder.moveUp(_:)))
+                return true
+            }
             guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
             parent.onSubmit()
             return true

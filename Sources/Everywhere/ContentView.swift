@@ -13,35 +13,15 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            searchBar
+            Divider()
             ResultsTableView()
-            statusBar
-        }
-        .overlay {
-            if !viewModel.searchText.isEmpty && viewModel.results.isEmpty && indexService.phase == .idle {
-                emptyState
-            }
-        }
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                HStack(spacing: 8) {
-                    SearchField(text: $viewModel.searchText, focusToken: viewModel.focusToken) {
-                        viewModel.openSelection()
+                .overlay {
+                    if !viewModel.searchText.isEmpty && viewModel.results.isEmpty && indexService.phase == .idle {
+                        emptyState
                     }
-                    .frame(minWidth: 180, idealWidth: 260, maxWidth: 340)
-                    searchModifiers
                 }
-            }
-            ToolbarItem {
-                Picker("Filter", selection: $viewModel.kindFilter) {
-                    Text("All").tag(KindFilter.all)
-                    Text("Folders").tag(KindFilter.folders)
-                    Text("Files").tag(KindFilter.files)
-                }
-                .pickerStyle(.segmented)
-                .controlSize(.small)
-                .frame(width: 190)
-                .accessibilityLabel("Filter results")
-            }
+            statusBar
         }
         .sheet(isPresented: Binding(get: { needsLaunchModal }, set: { _ in })) {
             Group {
@@ -59,6 +39,33 @@ struct ContentView: View {
         .onChange(of: settings.needsLocationSetup) { needsSetup in
             if !needsSetup { indexService.startIfNeeded() }
         }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            SearchField(text: $viewModel.searchText, focusToken: viewModel.focusToken,
+                        onHistory: { viewModel.navigateHistory(backward: $0) },
+                        onEndEditing: { viewModel.rememberSearch() }) {
+                viewModel.openSelection()
+            }
+            .frame(minWidth: 180, idealWidth: 260, maxWidth: .infinity)
+            searchModifiers
+            Picker("Filter", selection: $viewModel.kindFilter) {
+                Text("All").tag(KindFilter.all)
+                Text("Folders").tag(KindFilter.folders)
+                Text("Files").tag(KindFilter.files)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .frame(width: 170)
+            .accessibilityLabel("Filter results")
+            SearchHelpButton()
+                .frame(width: 24, height: 24)
+                .padding(.leading, 4)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     private var emptyState: some View {

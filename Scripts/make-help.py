@@ -57,6 +57,20 @@ for source, (name, title) in pages.items():
         return 'href="' + html.escape(urlunsplit(("", "", destination, url.query, url.fragment)), quote=True) + '"'
 
     body = re.sub(r'href="([^"]+)"', rewrite_link, body)
+    body = re.sub(r'(<h[1-6] id="([^"]+)"[^>]*>)',
+                  lambda match: f'<a name="{match[2]}"></a>' + match[1], body)
+    def copy_image(match):
+        url = urlsplit(html.unescape(match[1]))
+        if url.scheme or url.netloc or not url.path:
+            return match[0]
+        image = (root / source).parent.joinpath(url.path).resolve()
+        relative = image.relative_to(root)
+        destination = Path("assets") / relative
+        (resources / destination).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(image, resources / destination)
+        return 'src="' + html.escape(destination.as_posix(), quote=True) + '"'
+
+    body = re.sub(r'src="([^"]+)"', copy_image, body)
     (resources / name).write_text(document(title, body))
 
 license_text = html.escape((root / "LICENSE").read_text())

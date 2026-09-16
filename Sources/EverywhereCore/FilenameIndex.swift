@@ -11,20 +11,22 @@ final class FilenameIndex {
         let nameLength: Int32
         let isDirectory: Bool
         let isASCII: Bool
+        let mask: UInt64
     }
 
     private(set) var rows: [Row] = []
     private var names: [UInt8] = []
-    private var idOrder: [Int] = []
+    private var idOrder: [UInt32] = []
     private struct Ordering: Hashable {
         let key: SortKey
         let ascending: Bool
     }
-    private var sortOrders: [Ordering: [Int]] = [:]
+    private var sortOrders: [Ordering: [UInt32]] = [:]
     private var recentOrders: [Ordering] = []
     private var previousRequest: SearchRequest?
     private var previousTerms: [String]?
-    private var previousMatches: [Int] = []
+    private var previousMatches: [UInt32] = []
+    private var repeatedNames = false
     private var deadRows = 0
     private var unusedNameBytes = 0
 
@@ -34,8 +36,8 @@ final class FilenameIndex {
 
     var statistics: SearchCacheStatistics {
         SearchCacheStatistics(itemCount: rows.count - deadRows,
-                              storageBytes: rows.capacity * MemoryLayout<Row>.stride + names.capacity + (idOrder.capacity + previousMatches.capacity) * MemoryLayout<Int>.stride,
-                              sortBytes: sortOrders.values.reduce(0) { $0 + $1.capacity * MemoryLayout<Int>.stride },
+                              storageBytes: rows.capacity * MemoryLayout<Row>.stride + names.capacity + (idOrder.capacity + previousMatches.capacity) * MemoryLayout<UInt32>.stride,
+                              sortBytes: sortOrders.values.reduce(0) { $0 + $1.capacity * MemoryLayout<UInt32>.stride },
                               sortCount: sortOrders.count)
     }
 
@@ -48,6 +50,7 @@ final class FilenameIndex {
         defer { sqlite3_finalize(sizing) }
         _ = try step(sizing)
         let count = Int(sqlite3_column_int64(sizing, 0))
+        guard count < Int(UInt32.max) else { throw DatabaseError.invalidQuery("Filename cache exceeds its capacity. Disable the memory cache to search this index.") }
         rows.reserveCapacity(count + max(1024, count / 20))
         let nameBytes = Int(sqlite3_column_int64(sizing, 1))
         names.reserveCapacity(nameBytes + max(4096, nameBytes / 20))
@@ -57,17 +60,30 @@ final class FilenameIndex {
             throw DatabaseError.sql(String(cString: sqlite3_errmsg(connection)), sql: sql)
         }
         defer { sqlite3_finalize(statement) }
+        var nameLocations: [UInt64: Int] = [:]
+        var duplicates = 0
         while try step(statement) == SQLITE_ROW {
             guard let text = sqlite3_column_text(statement, 2) else { continue }
             let length = sqlite3_column_bytes(statement, 2)
             let bytes = UnsafeBufferPointer(start: text, count: Int(length))
+            let hash = bytes.reduce(UInt64(14695981039346656037)) { ($0 ^ UInt64($1)) &* 1099511628211 }
+            var nameOffset = names.count
+            if let location = nameLocations[hash], rows[location].nameLength == length,
+               names[rows[location].nameOffset..<(rows[location].nameOffset + Int(length))].elementsEqual(bytes) {
+                nameOffset = rows[location].nameOffset
+                duplicates += 1
+            } else {
+                nameLocations[hash] = rows.count
+                names.append(contentsOf: bytes)
+            }
             rows.append(Row(id: sqlite3_column_int64(statement, 0), parent: sqlite3_column_int64(statement, 1),
                             size: sqlite3_column_int64(statement, 4), modified: Double(sqlite3_column_int64(statement, 5)),
-                            nameOffset: names.count, nameLength: length,
-                            isDirectory: sqlite3_column_int(statement, 3) != 0, isASCII: bytes.allSatisfy { $0 < 128 }))
-            names.append(contentsOf: bytes)
+                            nameOffset: nameOffset, nameLength: length,
+                            isDirectory: sqlite3_column_int(statement, 3) != 0, isASCII: bytes.allSatisfy { $0 < 128 }, mask: NameQuery.characterMask(bytes)))
         }
-        idOrder = Array(rows.indices)
+        repeatedNames = duplicates > rows.count / 2
+        if duplicates > 0 { names = names.withUnsafeBufferPointer { Array($0) } }
+        idOrder = rows.indices.map { UInt32($0) }
     }
 
     func name(for row: Row) -> String {
@@ -100,11 +116,12 @@ final class FilenameIndex {
                 reuse = old.allSatisfy { term in new.contains { $0.contains(term) } }
             }
         }
-        var matches: [Int] = []
+        var matches: [UInt32] = []
         if identical {
             matches = previousMatches
         } else {
             let candidates = reuse ? previousMatches : idOrder
+            var nameMatches: [Int: Bool] = [:]
             try names.withUnsafeBufferPointer { bytes in
                 for (offset, index) in candidates.enumerated() {
                     if offset % 256 == 0 { try cancellation?.check() }
@@ -112,8 +129,15 @@ final class FilenameIndex {
                     guard request.includeHidden || bytes[row.nameOffset] != 46,
                           request.kind != .files || !row.isDirectory,
                           request.kind != .folders || row.isDirectory else { continue }
+                    if row.isASCII && !query.mayMatch(mask: row.mask) { continue }
+                    if repeatedNames, let matched = nameMatches[row.nameOffset] {
+                        if matched { matches.append(index) }
+                        continue
+                    }
                     let name = UnsafeBufferPointer(start: bytes.baseAddress!.advanced(by: row.nameOffset), count: Int(row.nameLength))
-                    if query.matches(bytes: name, isASCII: row.isASCII) { matches.append(index) }
+                    let matched = query.matches(bytes: name, isASCII: row.isASCII)
+                    if repeatedNames { nameMatches[row.nameOffset] = matched }
+                    if matched { matches.append(index) }
                 }
             }
         }
@@ -154,8 +178,8 @@ final class FilenameIndex {
         previousTerms = nil
         previousMatches = []
         let positions = Dictionary(uniqueKeysWithValues: changedIDs.compactMap { id in position(for: id).map { (id, $0) } })
-        var touched = Set<Int>()
-        var live: [Int] = []
+        var touched = Set<UInt32>()
+        var live: [UInt32] = []
         for (offset, id) in changedIDs.enumerated() {
             if offset % 256 == 0 { try cancellation?.check() }
             let existing = positions[id]
@@ -166,14 +190,14 @@ final class FilenameIndex {
                     unusedNameBytes += Int(old.nameLength)
                     rows[existing] = Row(id: 0, parent: old.parent, size: 0, modified: 0,
                                          nameOffset: old.nameOffset, nameLength: old.nameLength,
-                                         isDirectory: old.isDirectory, isASCII: old.isASCII)
+                                         isDirectory: old.isDirectory, isASCII: old.isASCII, mask: old.mask)
                     deadRows += 1
                 }
                 continue
             }
             let bytes = Array(replacement.name.utf8)
             let nameOffset: Int
-            if let existing, name(for: rows[existing]) == replacement.name {
+            if let existing, names[rows[existing].nameOffset..<(rows[existing].nameOffset + Int(rows[existing].nameLength))].elementsEqual(bytes) {
                 nameOffset = rows[existing].nameOffset
             } else {
                 if let existing { unusedNameBytes += Int(rows[existing].nameLength) }
@@ -182,16 +206,17 @@ final class FilenameIndex {
             }
             let row = Row(id: id, parent: replacement.parent, size: replacement.size, modified: replacement.modified,
                           nameOffset: nameOffset, nameLength: Int32(bytes.count), isDirectory: replacement.isDir,
-                          isASCII: bytes.allSatisfy { $0 < 128 })
+                          isASCII: bytes.allSatisfy { $0 < 128 }, mask: NameQuery.characterMask(bytes))
             if let existing {
                 rows[existing] = row
                 live.append(existing)
             } else {
-                live.append(rows.count)
+                guard let index = UInt32(exactly: rows.count), index < UInt32.max else { throw DatabaseError.invalidQuery("Filename cache exceeds its capacity. Disable the memory cache to search this index.") }
+                live.append(index)
                 rows.append(row)
             }
         }
-        var unchanged: [Int] = []
+        var unchanged: [UInt32] = []
         for (offset, index) in idOrder.enumerated() {
             if offset % 1024 == 0 { try cancellation?.check() }
             if !touched.contains(index) { unchanged.append(index) }
@@ -199,7 +224,7 @@ final class FilenameIndex {
         idOrder = try merged(unchanged, live.sorted { rows[$0].id < rows[$1].id }, cancellation: cancellation) { rows[$0].id < rows[$1].id }
         for ordering in recentOrders {
             guard let previous = sortOrders[ordering] else { continue }
-            var retained: [Int] = []
+            var retained: [UInt32] = []
             for (offset, index) in previous.enumerated() {
                 if offset % 1024 == 0 { try cancellation?.check() }
                 if !touched.contains(index) { retained.append(index) }
@@ -209,7 +234,7 @@ final class FilenameIndex {
         }
     }
 
-    private func position(for id: Int64) -> Int? {
+    private func position(for id: Int64) -> UInt32? {
         var lower = 0
         var upper = idOrder.count
         while lower < upper {
@@ -221,7 +246,7 @@ final class FilenameIndex {
         return idOrder[lower]
     }
 
-    private func sortedIndices(_ indices: [Int], ordering: Ordering, cancellation: SearchCancellation?) throws -> [Int] {
+    private func sortedIndices(_ indices: [UInt32], ordering: Ordering, cancellation: SearchCancellation?) throws -> [UInt32] {
         var comparisons = 0
         return try indices.sorted {
             comparisons += 1
@@ -230,7 +255,7 @@ final class FilenameIndex {
         }
     }
 
-    private func less(_ leftIndex: Int, _ rightIndex: Int, ordering: Ordering) -> Bool {
+    private func less(_ leftIndex: UInt32, _ rightIndex: UInt32, ordering: Ordering) -> Bool {
         let left = rows[leftIndex]
         let right = rows[rightIndex]
         let primary: ComparisonResult
@@ -263,8 +288,8 @@ final class FilenameIndex {
         return name(for: left).compare(name(for: right), options: .caseInsensitive)
     }
 
-    private func merged(_ left: [Int], _ right: [Int], cancellation: SearchCancellation?, less: (Int, Int) -> Bool) throws -> [Int] {
-        var result: [Int] = []
+    private func merged(_ left: [UInt32], _ right: [UInt32], cancellation: SearchCancellation?, less: (UInt32, UInt32) -> Bool) throws -> [UInt32] {
+        var result: [UInt32] = []
         result.reserveCapacity(left.count + right.count)
         var a = 0
         var b = 0
@@ -279,4 +304,11 @@ final class FilenameIndex {
         return result
     }
 
+}
+
+private extension Array {
+    subscript(position: UInt32) -> Element {
+        get { self[Int(position)] }
+        set { self[Int(position)] = newValue }
+    }
 }

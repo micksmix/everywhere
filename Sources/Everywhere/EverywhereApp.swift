@@ -68,14 +68,12 @@ struct EverywhereApp: App {
         .commands {
             CommandGroup(replacing: .help) {
                 Button("Everywhere Help") {
-                    if Bundle.main.object(forInfoDictionaryKey: "CFBundleHelpBookName") != nil {
-                        NSHelpManager.shared.registerBooks(in: Bundle.main)
-                        NSApp.showHelp(nil)
-                    } else {
-                        NSWorkspace.shared.open(URL(string: "https://github.com/micksmix/everywhere/blob/main/docs/USER_GUIDE.md")!)
-                    }
+                    AppHelp.showGuide()
                 }
                 .keyboardShortcut("?", modifiers: .command)
+                Button("Search Syntax") {
+                    AppHelp.showSearchSyntax()
+                }
             }
             SearchCommands(viewModel: viewModel, indexService: indexService, settings: settings)
         }
@@ -132,6 +130,16 @@ struct SearchCommands: Commands {
                 viewModel.openSelection()
             }
             .keyboardShortcut("o", modifiers: .command)
+
+            Button("Quick Look") {
+                viewModel.previewSelection?()
+            }
+            .keyboardShortcut("y", modifiers: .command)
+            .disabled(viewModel.selectedEntries.isEmpty)
+
+            Button("Clear Search History") {
+                viewModel.clearHistory()
+            }
 
             Button("Get Info") {
                 viewModel.showInfo(viewModel.selectedEntries)

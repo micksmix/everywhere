@@ -1,6 +1,8 @@
 # Search performance measurements
 
-Measured September 15, 2026 on the development Mac using disposable synthetic indexes.
+Measured September 15–16, 2026 on the development Mac using disposable synthetic indexes.
+Sections describe the implementation at the time of each measurement; the final section
+records the current shared-name cache and folder-scope changes.
 No real user index was opened or modified. These are local measurements, not latency or
 memory guarantees for every disk, filename distribution, or folder depth.
 
@@ -10,7 +12,8 @@ A release-build Swift harness created 1,000,000 files under one root. Names were
 `project_<number>_unit.pas` every hundredth file and `project_<number>_source.swift`
 otherwise. A `.pas` query returned 10,000 entries. Timings include matching, exact
 counting, sorting, path reconstruction, and result construction; they exclude the UI's
-90 ms typing debounce and drawing the table.
+then-current 90 ms typing debounce and drawing the table. The debounce was subsequently
+removed, as described under Immediate search and paging.
 
 | Mode | Measured time |
 | --- | --- |
@@ -27,9 +30,9 @@ index update take extra time to refresh the cache.
 
 ASCII matching uses packed UTF-8 bytes; non-ASCII names or terms use Swift's lowercase
 matching rules. Memory and disk modes use the same literal substring semantics,
-filters, result limits, and ordering. Regex, whole-word, wildcard, and path searches
-continue through the SQLite-backed engines. Clearing a search uses the existing
-index-backed recent-items query and shows up to 10,000 entries.
+filters, result limits, and ordering. At this stage, regex, whole-word, wildcard, and path searches went through SQLite-backed
+engines, and clearing a search showed up to 10,000 recent entries. Filename wildcards now
+use the packed cache when enabled, and the table loads 200-row pages without that cap.
 
 A separate cancellation check stopped an ongoing million-row disk query after 12.7 ms
 with cancellation scheduled at 10 ms. Subsequent searches succeeded. A disposable
@@ -177,3 +180,68 @@ not a physical keyboard/mouse interaction test. Permanent tests cover paging acr
 engines and sort directions, filtered totals, narrowing/refinement, cache invalidation,
 Unicode/boolean parity, and byte-glob equivalence to ICU for ASCII control characters.
 The long-running benchmark and UI harness were not added to the repository.
+
+
+## Shared names, masks, compact positions, and folder scopes (September 16, 2026)
+
+A disposable release XCTest fixture created 100,000 files across 200 directories,
+500 files per directory. The repeated-name fixture used `component-<file>.swift`;
+the mostly unique fixture used `component-<directory>-<file>.swift`. Directory names
+were `project-<directory>`. Each fixture prepared the cache and modification sort,
+then ran this six-query sequence five times with 200-row pages:
+
+`absent-zebra`, `component-42`, `*.swift !*1*`, `component`, `swift`, `42 | 72`.
+
+The medians below summarize the 30 searches per fixture, including matching, exact
+counts, sorting, and path materialization. They are mixed-workload medians, not a claim
+that every query improves by the same percentage. Baseline and changed implementations
+ran on the same Mac. The files, query sequence, page limit, and sort were unchanged.
+
+| Fixture / measurement | Before | After |
+| --- | ---: | ---: |
+| Repeated names: median search | 3.05 ms | 1.79 ms |
+| Mostly unique names: median search | 3.47 ms | 2.81 ms |
+| Repeated names: cache and sort preparation | 33.71 ms | 37.40 ms |
+| Mostly unique names: cache and sort preparation | 35.21 ms | 40.27 ms |
+| Repeated names: estimated cache arrays including one sort | 8.70 MB | 6.75 MB |
+| Mostly unique names: estimated cache arrays including one sort | 10.91 MB | 10.96 MB |
+
+The tradeoff is approximately 42% and 19% lower mixed-query medians, respectively,
+with 11–14% slower initial preparation. Repeated-name retained array storage fell
+about 22%; mostly unique-name storage was nearly unchanged. These are decimal MB,
+capacity-based retained-array estimates, not whole-process or peak resident memory.
+The temporary hash table used while loading and the per-search match map are excluded.
+
+Identical names share packed bytes after exact UTF-8 equality checks. Hash collisions
+cannot merge different names. When more than half the loaded rows repeat names, a
+search can reuse a name's matching decision, while kind and hidden filters remain
+per-row. ASCII character masks only reject impossible matches; non-ASCII names bypass
+them. Candidate and sort arrays now use checked 32-bit positions rather than 64-bit
+positions. Database IDs remain 64-bit, and full paths remain absent from the cache.
+
+A separate pass over the same fixtures compared `/project-42/*` (full-path wildcard
+scan) with `in:/project-42` and `parent:/project-42` (tree scopes). Each returned exactly
+500 matches, with a 200-row first page:
+
+| Query | Measured time across the two fixtures |
+| --- | ---: |
+| `/project-42/*` | 445.8–453.9 ms |
+| `in:/project-42` | 2.90–3.63 ms |
+| `parent:/project-42` | 2.49–2.75 ms |
+
+These queries are equivalent for this fixture because each selected directory contains
+only files. `in:` includes descendants while `parent:` includes only direct children;
+they differ when there are subdirectories. Tree scopes and simple absolute trailing-slash
+prefix queries now use recursive SQLite parent traversal to restrict candidates before
+name matching. Other path expressions still use the scan engine. Metadata-filter queries
+also use SQLite-backed evaluation in both memory settings.
+
+SQLite remains the sole persistent index; these changes leave schema version 4 unchanged.
+No new binary snapshot, full-path column, or FTS prefix index was introduced. Permanent
+tests cover shared-name and mask parity, Unicode, updates/deletions, sorted pages, filter
+logic, case-sensitive scopes, separate roots, date boundaries, and cancellation. The
+benchmark fixture was removed after measurement.
+
+A disposable AppKit/SwiftUI app using an isolated database verified result highlighting
+and history state. Native keyboard interaction additionally verified Space opening Quick
+Look, Escape closing it, and Up/Down recalling a search and restoring its draft.

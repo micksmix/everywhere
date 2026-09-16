@@ -6,9 +6,17 @@ import UniformTypeIdentifiers
 final class ContentViewModel: ObservableObject, @unchecked Sendable {
     @Published var searchText: String = "" {
         didSet {
-            if searchText != oldValue { scheduleSearch() }
+            if searchText != oldValue {
+                if !navigatingHistory { history.resetNavigation() }
+                scheduleSearch()
+            }
         }
     }
+    @Published private(set) var displayedRequest = SearchRequest()
+    var previewSelection: (() -> Void)?
+    private var history = SearchHistory()
+    private var navigatingHistory = false
+
     @Published private(set) var results: [Entry] = []
     @Published var selection: Set<Int64> = []
     @Published private(set) var totalMatches = 0
@@ -67,6 +75,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
 
     init(database: Database, indexService: IndexService, defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        history = SearchHistory(entries: defaults.stringArray(forKey: "SearchHistory") ?? [])
         sortKey = SortKey(rawValue: defaults.string(forKey: "ResultsSortKey") ?? "") ?? .name
         sortAscending = defaults.object(forKey: "ResultsSortAscending") == nil || defaults.bool(forKey: "ResultsSortAscending")
         self.database = database
@@ -114,6 +123,24 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
 
     func focusSearch() {
         focusToken += 1
+    }
+
+    func rememberSearch() {
+        history.record(searchText)
+        defaults.set(history.entries, forKey: "SearchHistory")
+    }
+
+    func navigateHistory(backward: Bool) {
+        let value = backward ? history.previous(current: searchText) : history.next()
+        guard let value else { return }
+        navigatingHistory = true
+        searchText = value
+        navigatingHistory = false
+    }
+
+    func clearHistory() {
+        history = SearchHistory()
+        defaults.removeObject(forKey: "SearchHistory")
     }
 
     func clearSearch() {
@@ -201,6 +228,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
                         self.scheduleSearch()
                         return
                     }
+                    self.displayedRequest = request
                     self.apply(result, append: offset > 0)
                     self.loadedGeneration = generation
                     self.elapsedMS = (CFAbsoluteTimeGetCurrent() - started) * 1000
@@ -245,6 +273,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     }
 
     func openSelection() {
+        rememberSearch()
         for entry in selectedEntries.prefix(10) {
             Self.open(entry)
         }
@@ -255,6 +284,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     }
 
     func revealSelection() {
+        rememberSearch()
         let urls = selectedEntries.map { URL(fileURLWithPath: $0.path) }
         guard !urls.isEmpty else { return }
         NSWorkspace.shared.activateFileViewerSelecting(urls)

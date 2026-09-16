@@ -21,10 +21,13 @@ techniques, adapted to macOS:
 ```
 Sources/EverywhereCore/        library (no UI)
   Database.swift               SQLite schema, search engines, path materialization
-  FilenameIndex.swift          packed names, incremental cache refresh, bounded fast sort orders
+  FilenameIndex.swift          shared packed names, rejection masks, incremental cache refresh, bounded fast sort orders
   SearchCancellation.swift     cooperative search cancellation and SQLite progress handler token
   Entry.swift                  Entry/IndexRow/SearchRequest/SearchResult/query builder
   SearchQueryParser.swift      query-language parser (| ! quotes, wildcard/slash flags)
+  NameQuery.swift              compiled name matching, ASCII masks and globs, Unicode fallback
+  FilterQuery.swift            extension/type, size/date, kind and folder-scope filters
+  SearchHistory.swift          bounded query history and match-highlight ranges
   Indexer.swift                FilesystemIndexer (initial walk) + Reconciler (diff updates)
   FSEventsMonitor.swift        FSEventStream wrapper + ChangeHandler (debounced ingest)
   IndexService.swift           serial scan jobs, startup replay, monitoring, published state
@@ -34,18 +37,23 @@ Sources/EverywhereCore/        library (no UI)
 Sources/Everywhere/            app (SwiftUI + AppKit)
   EverywhereApp.swift          @main, scenes, Search menu commands
   AppDelegate.swift            stable main-window registration, openWindow fallback, activation
-  ContentView.swift            toolbar search/modifier toggles, status bar, empty state
-  SearchField.swift            NSSearchField bridge and search-focus handling
+  ContentView.swift            content search row/modifier toggles, status bar, empty state
+  SearchField.swift            NSSearchField bridge, search focus and history navigation
+  SearchHelp.swift             native help button, syntax tips, context-specific offline guide links
+  HelpWindowController.swift  native offline Help window with WebKit, navigation and page search
   IndexingProgressView.swift   compact spinner, counts, Pause/Resume control
-  ContentViewModel.swift       debounced search scheduling, selection actions
-  ResultsTableView.swift       NSTableView (native sortable columns, context menu, Open With)
+  ContentViewModel.swift       immediate cancellable search scheduling, paging, history and selection actions
+  ResultsTableView.swift       NSTableView (sorting, highlighting, context menu, Open With, Quick Look)
   SettingsView.swift           Settings scene
   StatusItemController.swift   menu bar icon: left-click opens, right-click menu (Quit)
   GlobalHotKey.swift           Carbon RegisterEventHotKey (⌥Space) + HotKeyManager
 Resources/AppIcon.svg         source artwork; design details in AppIcon-design.md
 Scripts/make-icon.swift        renders SVG source into exact-size ICNS representations
+Scripts/make-help.py           generates offline Help HTML, named anchors and search index
+Resources/Help/help.css        adaptive light/dark help styling
 README.md                     overview, requirements, build/install instructions
 docs/USER_GUIDE.md             common tasks, query examples, shortcuts, troubleshooting
+docs/SEARCH_PERFORMANCE.md     dated synthetic benchmarks and limitations
 Tests/EverywhereCoreTests/     XCTest (all logic tests live here; no UI tests)
 ```
 
@@ -96,6 +104,11 @@ and re-measure both size and speed.
      run's last char, quantified groups discard their runs, any `|` or `(?` in the
      pattern disables the prefilter (full scan). Non-ASCII literals also disable it
      (SQLite `lower()` folds ASCII only). Getting this wrong silently hides results.
+   - recognized metadata/folder filters and simple absolute trailing-slash prefixes
+     → `filteredSearch`: compile per-OR-group SQL conditions, traverse folder scopes
+     through parent links, then match names; preserve negation and exact totals.
+     Filters use indexed metadata, not live filesystem reads. Regex mode takes priority.
+     Fully quoted filter tokens remain literal text.
    - literal name queries (single AND-group, no negation/wildcards/slashes/Match Path/whole-word)
      → substring matching, including punctuation and mid-token fragments. Optional packed
      memory cache accelerates these; disk mode streams rows with identical matching rules.
@@ -111,6 +124,10 @@ and re-measure both size and speed.
    the writer is busy, another connection has written, changes overflow, or compaction is
    needed. Cancelled partial patches must discard the cache. Release it in disk mode.
    Keep at most three lazy sort orders and merge changed rows into existing orders.
+   Share names only after exact UTF-8 equality (hashes alone are insufficient). Character
+   masks are conservative ASCII rejection filters; non-ASCII rows bypass them. Reuse
+   name-match decisions only when metadata/kind/hidden filtering remains per-row. Cache
+   positions are checked UInt32 values; SQLite IDs remain Int64.
    Memory statistics estimate allocated array storage, not whole-process memory. ASCII searches compare packed bytes, Unicode
    searches retain Swift lowercase semantics. One completed candidate list can be reused
    for identical or provably narrower literal queries with unchanged filters. Invalidate
@@ -228,6 +245,9 @@ and re-measure both size and speed.
 - Indexing activity is a compact status-bar spinner with item count and Pause/Resume;
   a paused state uses a static pause icon. Do not invent a percent-complete value for
   a filesystem walk whose total is unknown.
+- Keep one standard AppKit help button inside the main content search row, not the
+  toolbar/status bar. Tips use a transient native popover with accessible labels and
+  a link to the syntax topic. Preserve named HTML anchors in the generated Help book.
 - Update the README and user guide when changing controls, shortcuts, query syntax,
   build/install steps, or indexing behavior. Keep user steps separate from internals.
 - The name is **Everywhere**; bundle id `app.everywhere.macos`; DB dir

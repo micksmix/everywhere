@@ -33,11 +33,12 @@ struct NameQuery {
 
     let groups: [[Term]]
     let matchCase: Bool
+    let requiredMasks: [UInt64]
     let literalTerms: [String]?
 
-    init(_ request: SearchRequest) {
+    init(_ request: SearchRequest, parsed: ParsedQuery? = nil) {
         matchCase = request.matchCase
-        let parsed = SearchQueryParser.parse(request.text)
+        let parsed = parsed ?? SearchQueryParser.parse(request.text)
         groups = parsed.groups.map { group in
             group.terms.map { Term($0, matchCase: request.matchCase, wholeWord: request.wholeWord) }
                 .sorted { left, right in
@@ -45,9 +46,26 @@ struct NameQuery {
                     return left.bytes.count > right.bytes.count
                 }
         }
+        requiredMasks = parsed.groups.map { group in
+            group.terms.reduce(UInt64(0)) { mask, term in
+                guard !term.isNegated, term.text.utf8.allSatisfy({ $0 < 128 }) else { return mask }
+                return mask | Self.characterMask(term.text.utf8.filter { !term.hasWildcards || ($0 != 42 && $0 != 63) })
+            }
+        }
         literalTerms = parsed.groups.count == 1 && !request.wholeWord &&
             parsed.groups[0].terms.allSatisfy { !$0.isNegated && !$0.hasWildcards }
             ? groups[0].map(\.text) : nil
+    }
+
+    static func characterMask<S: Sequence>(_ bytes: S) -> UInt64 where S.Element == UInt8 {
+        bytes.reduce(UInt64(0)) { mask, byte in
+            let folded = byte >= 65 && byte <= 90 ? byte + 32 : byte
+            return mask | (UInt64(1) << (folded & 63))
+        }
+    }
+
+    func mayMatch(mask: UInt64) -> Bool {
+        requiredMasks.contains { mask & $0 == $0 }
     }
 
     func matches(bytes: UnsafeBufferPointer<UInt8>, isASCII: Bool) -> Bool {

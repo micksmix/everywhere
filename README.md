@@ -10,7 +10,9 @@ It indexes names and filesystem metadata, not document contents.
 ## Features
 
 - Search as you type, with case, whole-word, path, regex, and hidden-file controls beside the search field.
-- All, Folders, and Files filters; sortable results and saved column layouts.
+- All, Folders, and Files filters; extension/type, size, modification-date, and folder-scope queries; sortable results and saved column layouts.
+- Native **?** syntax tips beside the search controls, with a full offline search guide.
+- Quick Look previews, bold match highlighting, and saved search history.
 - Open files, reveal them in Finder, choose an application, open a directory in your default terminal, and copy names or paths.
 - Runs in the menu bar when its windows are closed; open windows have normal app menus, a Dock icon, and a ⌘Tab entry. Includes a configurable global shortcut (default: **⌥Space**; change it in **Settings → General**).
 - Optional **Launch on Startup** in **Settings → General → Startup** opens Everywhere automatically when you log in. Enable it from the installed app; if macOS requests approval, use **Open Login Items…**.
@@ -107,11 +109,28 @@ Run only one copy when testing the global shortcut.
 1. Open Everywhere and choose **Home folder** (recommended), **Entire Mac**, or **Choose folders** before the first scan. Home includes `~/Library`. Existing installations keep their locations.
 2. If the index is empty and protected file access is denied, a separate **Allow Full Disk Access** dialog appears before indexing. Use **Open Full Disk Access Settings**, enable Everywhere, then quit and reopen it. **Check Again** retries the check; **Continue with Limited Access** proceeds with accessible files.
 3. Choose **Rebuild Index** after changing locations or exclusions. Let any current operation finish first.
-4. Type a filename or word from its name. Try `report`, or `*.pdf` for PDF filenames.
+4. Type a filename fragment. Try `report`, or `ext:pdf` for PDF files. Click **?** beside the search controls for syntax examples.
 5. Select a result and press **⌘O**, or double-click it, to open it.
 
 Full Disk Access gives more complete results and fewer permission prompts. The same settings button is available in **Settings → Locations**. Enable Everywhere (use **+** to add it from Applications if needed), then quit and reopen the app. If already scanned, choose **Reindex Accessible Files** there. Everywhere indexes filenames and metadata, not file contents. See the
 [user guide](docs/USER_GUIDE.md) for setup, search examples, and troubleshooting.
+
+### Filters, previews, and search history
+
+Combine name terms with `ext:pdf;txt`, `type:image`, `size:>100MB`, or
+`dm:pastweek`. Restrict a search to a folder with `in:"~/Documents/Reports"`
+(including subfolders), or use `parent:~/Downloads` for direct children only.
+`file:` and `folder:` restrict item kind. Filters support the existing `!` and `|`
+operators; regex mode continues to interpret the entire query as a regular expression.
+See the [filter reference](docs/USER_GUIDE.md#filter-by-type-size-date-or-folder)
+for units, date boundaries, and examples.
+
+Matching text is bold in results. Select a result and press **Space** or **⌘Y**
+for Quick Look; arrow keys follow the selection while the preview is open.
+Use **↑/↓** in the search field to revisit searches. Up to 50 queries are saved
+when you submit, open/reveal results, or leave the search field. Down past the
+newest saved query restores your draft. **Search → Clear Search History** removes
+saved queries.
 
 ## How indexing works
 
@@ -221,8 +240,9 @@ enabled by default. It caches packed names and metadata for substring, wildcard,
 negated filename searches;
 turn it off to use less active memory and query SQLite directly, which can be slower.
 The cache and selected sort order warm in the background while indexing is idle, and
-small index changes apply incrementally. Regex, whole-word, and path queries continue
-to use SQLite. Full paths are not retained in the memory cache.
+small index changes apply incrementally. Metadata filters, folder scopes, regex, whole-word,
+and other path queries use SQLite-backed engines. Folder scopes traverse parent links
+before filename matching. Full paths are not retained in the memory cache.
 
 Searches start immediately as you type. The first 200 results appear before more rows
 load as you scroll, with an exact match count and no 10,000-result table cap. Narrowing
@@ -233,8 +253,16 @@ table drawing.
 Plain searches now preserve punctuation and find fragments anywhere in a name. Clearing the search with **×** or **⌘K**
 restores the recent-items view, and newer searches cancel obsolete work.
 
-The smaller FTS format requires a one-time index rebuild on launch. Benchmark details
+Older database schemas are rebuilt automatically on launch. The current search and help
+improvements do not change the SQLite schema or require another rebuild. Benchmark details
 and limitations are in [Search performance measurements](docs/SEARCH_PERFORMANCE.md).
+
+The filename cache shares identical UTF-8 names, reuses match decisions when names
+are highly repetitive, and rejects impossible ASCII matches using character masks.
+Candidate and sort arrays use checked 32-bit positions; database IDs remain 64-bit.
+Folder scopes and ordinary absolute directory-prefix queries traverse SQLite parent
+links before matching names. SQLite remains the persistent index; no additional
+binary index is created.
 
 ### Sorting, memory usage, and exclusions
 
@@ -247,7 +275,8 @@ Performance** shows estimated filename-cache and sort-array memory use.
 **Excluded Name Patterns** such as `*.tmp; *.log`. Patterns match whole names; existing
 substring exclusions still work separately. Rebuild the index after changing exclusions.
 
-Indexes from earlier versions are rebuilt once on launch to remove duplicate paths created by folder updates. Live updates now reuse the existing indexed folder tree.
+Schema version 4 rebuilds indexes from older schemas to remove duplicate paths created
+by folder updates. Live updates reuse the existing indexed folder tree.
 
 Select a result and press **⌘I**, or right-click → **Get Info**, to open Finder’s own
 information window. Get Info is also in the Search menu and supports up to ten selected
@@ -255,10 +284,16 @@ files or folders without changing the clipboard.
 
 ### Built-in help and license
 
-Choose **Help → Everywhere Help** (or **⌘?**) to read the user guide in macOS Help Viewer.
+Click the native **?** button at the right of the search row for concise syntax examples.
+Click outside the tips or press **Escape** to dismiss them; the query stays unchanged.
+**Full Search Guide** and **Help → Search Syntax** open the syntax topic directly.
+Choose **Help → Everywhere Help** (or **⌘?**) to read the complete guide in the resizable Everywhere Help window.
+Use **Find on Page** to search the current help page; press Return to advance to the next match.
+The Back, Forward, and User Guide toolbar buttons navigate help pages.
 The bundled help works offline and includes the overview, installation steps, search
 performance notes, and Apache License 2.0. `make app` regenerates it from the Markdown
-documents, so documentation changes ship with the app. `make run` opens the online guide instead.
+documents, so documentation changes ship with the app. The quick tips also work offline.
+Unbundled runs (`make run`) open the corresponding online guide section for full help.
 
 **Everywhere → About Everywhere** shows the Apache License 2.0 license and a link to
 [the project on GitHub](https://github.com/micksmix/everywhere).

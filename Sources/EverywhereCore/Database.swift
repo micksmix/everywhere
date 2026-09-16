@@ -7,6 +7,7 @@ public enum DatabaseError: Error, LocalizedError {
     case open(String)
     case sql(String, sql: String)
     case invalidRegex(String)
+    case invalidQuery(String)
 
     public var errorDescription: String? {
         switch self {
@@ -14,6 +15,8 @@ public enum DatabaseError: Error, LocalizedError {
             return "Could not open index database at \(path)."
         case .sql(let message, let sql):
             return "SQL error: \(message) — \(sql)"
+        case .invalidQuery(let message):
+            return message
         case .invalidRegex(let pattern):
             return "Invalid regular expression: \(pattern)"
         }
@@ -675,6 +678,8 @@ public final class Database: @unchecked Sendable {
             result = try scanSearch(request, useRegex: true)
         } else if useRegex {
             result = try regexSearch(request)
+        } else if FilterQuery.containsFilters(request.text) {
+            result = try filteredSearch(request)
         } else if isNameQuery(request), !request.wholeWord {
             result = try nameSearch(request, useMemory: useMemory)
         } else if let match = ftsQueryFor(request) {
@@ -797,6 +802,127 @@ public final class Database: @unchecked Sendable {
         !request.useRegex && !request.matchPath && !SearchQueryParser.parse(request.text).groups.contains {
             $0.terms.contains { $0.hasPathSeparator }
         }
+    }
+
+    private func filteredSearch(_ request: SearchRequest) throws -> SearchResult {
+        let query = try FilterQuery(request.text)
+        var scopes: [String] = []
+        var conditions: [String] = []
+        for group in query.groups {
+            var predicates: [String] = []
+            for filter in group.filters {
+                let predicate: String
+                switch filter.predicate {
+                case .scope(let path, let recursive):
+                    let roots = try scopeRoots(path: path, recursive: recursive, matchCase: request.matchCase)
+                    let parents = roots.folders.map(String.init).joined(separator: ",")
+                    let included = roots.included.map(String.init).joined(separator: ",")
+                    let name = "scope\(scopes.count)"
+                    let anchor = "SELECT id FROM entries WHERE parent IN (\(parents)) OR id IN (\(included))"
+                    scopes.append("\(name)(id) AS (\(anchor)" + (recursive ? " UNION ALL SELECT e.id FROM entries e JOIN \(name) s ON e.parent = s.id" : "") + ")")
+                    predicate = "id IN (SELECT id FROM \(name))"
+                case .directory(let directory): predicate = "is_dir = \(directory ? 1 : 0)"
+                case .size(let range): predicate = "is_dir = 0 AND (\(rangeSQL(range, column: "size")))"
+                case .modified(let range): predicate = rangeSQL(range, column: "modified")
+                case .extensions: continue
+                }
+                predicates.append(filter.negated ? "NOT (\(predicate))" : "(\(predicate))")
+            }
+            conditions.append(predicates.isEmpty ? "1" : predicates.joined(separator: " AND "))
+        }
+        let matchers = query.groups.map { group in
+            group.terms.map { term -> (NameQuery, Bool, String?, Bool) in
+                let parsed = ParsedQuery(groups: [ParsedGroup(terms: [ParsedTerm(text: term.text, isNegated: false, isQuoted: term.isQuoted)])])
+                return (NameQuery(request, parsed: parsed), request.matchPath || term.hasPathSeparator,
+                        term.endsWithPathSeparator && !term.hasWildcards ? term.text : nil, term.isNegated)
+            }
+        }
+        let columns = conditions.enumerated().map { "(\($0.element)) AS g\($0.offset)" }.joined(separator: ", ")
+        let allowed = conditions.indices.map { "g\($0)" }.joined(separator: " OR ")
+        let sql = (scopes.isEmpty ? "" : "WITH RECURSIVE " + scopes.joined(separator: ", ") + " ") +
+            "SELECT id, parent, name, is_dir, size, modified, \(columns) FROM entries WHERE name != '' AND (\(allowed))"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(searchReader, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw DatabaseError.sql(Self.errorMessage(searchReader), sql: sql)
+        }
+        defer { sqlite3_finalize(statement) }
+        var matches: [BareRow] = []
+        while try stepSearch(statement) == SQLITE_ROW {
+            let row = Self.bareRow(statement)
+            guard request.includeHidden || !row.name.hasPrefix("."),
+                  request.kind != .files || !row.isDir, request.kind != .folders || row.isDir else { continue }
+            var path: String?
+            for (index, group) in query.groups.enumerated() {
+                guard sqlite3_column_int(statement, Int32(6 + index)) != 0,
+                      group.filters.allSatisfy({ $0.matches(name: row.name, isDirectory: row.isDir, size: row.size, modified: row.modified) }) else { continue }
+                var matched = true
+                for (matcher, usesPath, prefix, negated) in matchers[index] {
+                    if usesPath && path == nil { path = try resolvePath(for: row.id) }
+                    let target = usesPath ? path! : row.name
+                    let found: Bool
+                    if let prefix {
+                        found = request.matchCase ? target.hasPrefix(prefix) : target.lowercased().hasPrefix(prefix.lowercased())
+                    } else {
+                        found = matcher.matches(target)
+                    }
+                    if negated ? found : !found { matched = false; break }
+                }
+                if matched { matches.append(row); break }
+            }
+        }
+        let sorted = try sortedRows(matches, request: request)
+        let page = sorted.dropFirst(max(0, request.offset)).prefix(max(1, min(request.limit, 100_000)))
+        let paths = try materializePaths(ids: page.map(\.id))
+        let entries = page.map { Entry(id: $0.id, path: paths[$0.id] ?? $0.name, name: $0.name,
+                                      isDirectory: $0.isDir, size: $0.size, modified: Date(timeIntervalSince1970: $0.modified)) }
+        return SearchResult(entries: entries, total: matches.count, elapsedMS: 0)
+    }
+
+    private func rangeSQL(_ range: FilterQuery.NumericRange, column: String) -> String {
+        var conditions: [String] = []
+        if range.minimum.isFinite { conditions.append("\(column) \(range.includesMinimum ? ">=" : ">") \(range.minimum)") }
+        if range.maximum.isFinite { conditions.append("\(column) \(range.includesMaximum ? "<=" : "<") \(range.maximum)") }
+        let condition = conditions.isEmpty ? "1" : conditions.joined(separator: " AND ")
+        return range.inverted ? "NOT (\(condition))" : condition
+    }
+
+    private func scopeRoots(path: String, recursive: Bool, matchCase: Bool) throws -> (folders: [Int64], included: [Int64]) {
+        func components(_ path: String) -> [String] { path.split(separator: "/").map { matchCase ? String($0) : $0.lowercased() } }
+        func directories(parent: Int64) throws -> [(Int64, String)] {
+            let sql = "SELECT id, name FROM entries WHERE parent = ?1 AND is_dir = 1"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(searchReader, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+                throw DatabaseError.sql(Self.errorMessage(searchReader), sql: sql)
+            }
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int64(statement, 1, parent)
+            var result: [(Int64, String)] = []
+            while try stepSearch(statement) == SQLITE_ROW {
+                result.append((sqlite3_column_int64(statement, 0), String(cString: sqlite3_column_text(statement, 1))))
+            }
+            return result
+        }
+        let target = components(path)
+        var folders: [Int64] = []
+        var included: [Int64] = []
+        for (id, name) in try directories(parent: 0) {
+            let root = components(name)
+            if root.count > target.count, Array(root.prefix(target.count)) == target {
+                if recursive || root.count == target.count + 1 { included.append(id) }
+            } else if target.count >= root.count, Array(target.prefix(root.count)) == root {
+                var parents = [id]
+                for component in target.dropFirst(root.count) {
+                    var next: [Int64] = []
+                    for parent in parents {
+                        for (child, name) in try directories(parent: parent) where (matchCase ? name : name.lowercased()) == component { next.append(child) }
+                    }
+                    parents = next
+                    if parents.isEmpty { break }
+                }
+                folders.append(contentsOf: parents)
+            }
+        }
+        return (folders, included)
     }
 
     private func nameSearch(_ request: SearchRequest, useMemory: Bool) throws -> SearchResult {

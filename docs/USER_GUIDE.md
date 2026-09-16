@@ -6,9 +6,16 @@ The Homebrew release includes native Apple Silicon (ARM64) and Intel (x86_64)
 binaries in one app for macOS 13 or later. Maintainers can find the automated
 build and tap setup in [How to release](../README.md#how-to-release).
 
-Choose **Help → Everywhere Help** or press **⌘?** to open this guide in macOS Help Viewer.
+Click **?** at the right of the search row for syntax tips. Click outside the tips or
+press **Escape** to dismiss them without changing your query. Choose **Full Search Guide**
+in the tips, or **Help → Search Syntax**, to open the syntax reference directly.
+
+Choose **Help → Everywhere Help** or press **⌘?** to open this guide in the resizable Everywhere Help window.
+Use **Find on Page** to search the current help page; press Return to advance to the next match.
+The Back, Forward, and User Guide toolbar buttons navigate help pages.
 The installed app includes offline help, installation information, performance notes,
-and the Apache License 2.0 text. When running with `make run`, Help opens the online guide.
+and the Apache License 2.0 text. Quick tips work offline too. When running with
+`make run`, full Help opens the corresponding online guide section.
 Choose **Everywhere → About Everywhere** for license information and the
 [project website](https://github.com/micksmix/everywhere).
 
@@ -18,6 +25,8 @@ Choose **Everywhere → About Everywhere** for license information and the
 - [Find a file or folder](#find-a-file-or-folder)
 - [Use search modifiers](#use-search-modifiers)
 - [Search with patterns](#search-with-patterns)
+- [Filter by type, size, date, or folder](#filter-by-type-size-date-or-folder)
+- [Preview results and revisit searches](#preview-results-and-revisit-searches)
 - [Open, reveal, or copy results](#open-reveal-or-copy-results)
 - [Choose indexed folders](#choose-indexed-folders)
 - [Exclude names](#exclude-names)
@@ -59,7 +68,7 @@ Use **Reset to ⌥ Space** to restore the default. Keys refer to their US keyboa
 2. Type a name, such as `report`. Searching starts immediately as you type.
 3. Choose **All**, **Folders**, or **Files** beside the search controls.
 4. Click a result column heading to sort the search results; click again to reverse the order. The column and direction are saved across launches.
-5. Drag column boundaries to resize them. The app saves the column layout.
+5. Drag column boundaries to resize them. The app saves the column layout. Cells stay on one line; long values are truncated in the middle. Widen a column or the window to reveal more text.
 
 Simple name searches match literal fragments anywhere in a name: `port` finds
 `report.pdf`, and `.pas` finds names containing `.pas`, including the dot.
@@ -74,7 +83,7 @@ Everywhere searches names and paths, not the text inside documents.
 
 ## Use search modifiers
 
-These buttons are beside the search field. Click to switch an option on or off;
+These buttons are beside the search field in the row above the results. Click to switch an option on or off;
 the Search menu controls the same options.
 
 | Button | Effect |
@@ -98,7 +107,7 @@ Keep **.\*** off for the ordinary query examples below.
 
 | Query | Use |
 | --- | --- |
-| `report` | Find a word beginning with `report` in a filename |
+| `report` | Find the fragment `report` anywhere in a filename |
 | `annual report` | Require both terms |
 | `"annual report"` | Keep words together as one phrase term |
 | `report \| invoice` | Match either group of terms |
@@ -112,7 +121,8 @@ Keep **.\*** off for the ordinary query examples below.
 match the entire target, so include surrounding stars when searching for a fragment.
 With **Path** enabled, the target is the entire path rather than just the name.
 A term containing `/` also uses path matching even when the Path button is off.
-A trailing slash on a non-wildcard path term means a path-prefix search.
+A trailing slash on a non-wildcard path term means a path-prefix search. Use `in:`
+or `parent:` to select a folder scope explicitly.
 
 Whitespace combines terms with AND, and `|` separates alternative groups. Parentheses
 are not a grouping feature of the ordinary query language. Plain name queries use literal
@@ -131,6 +141,76 @@ Ordinary wildcard syntax such as `*.pdf` is not a valid substitute for a regex.
 The Word button does not add boundaries to a regex; express those in the pattern itself.
 Invalid expressions produce an error in the status bar.
 
+## Filter by type, size, date, or folder
+
+Keep **.\*** off when using filters. Filters combine with ordinary name terms,
+phrases, wildcards, `!`, and `|`. Terms within a group are ANDed; `|` separates
+alternative groups, so `ext:pdf report | ext:txt notes` matches either complete group.
+The existing All/Files/Folders and Hidden controls still apply to every group.
+
+| Query | Meaning |
+| --- | --- |
+| `ext:pdf;txt report` | PDF or text files whose names contain report |
+| `type:image vacation` | Image files whose names contain vacation |
+| `file: !ext:zip` | Files other than ZIP files |
+| `folder:Projects` | Folders whose names contain Projects |
+| `size:>100MB` | Files larger than 100 decimal megabytes |
+| `size:1MiB..10MiB` | Files from 1 through 10 binary mebibytes, inclusive |
+| `size:empty` | Zero-byte files |
+| `dm:pastweek` | Items modified within the previous week |
+| `dm:2025-01-01..2025-01-31` | Items modified during January 2025 |
+| `in:~/Documents report` | Matching descendants of Documents |
+| `parent:"~/My Documents"` | Direct children of My Documents |
+| `ext:pdf !in:~/Downloads` | PDF files outside Downloads |
+| `"ext:pdf"` | The literal filename text ext:pdf |
+
+`ext:` ignores case and applies only to files. `type:` supports `image`, `audio`,
+`video`, `doc`, `code`, `archive`, `spreadsheet`, `presentation`, and `pdf`; these
+are extension-based categories, not content inspection. Size filters also apply
+only to files; directory sizes are not summed.
+
+Sizes accept `>`, `>=`, `<`, `<=`, `=`, `!=`, and `minimum..maximum` ranges.
+Units `KB`, `MB`, `GB`, and `TB` are decimal; `KiB`, `MiB`, `GiB`, and `TiB`
+are binary. No unit means bytes. A range may omit either endpoint.
+
+`dm:` (also `datemodified:`) accepts `YYYY-MM-DD`, comparisons, ranges, `today`,
+`yesterday`, `thisweek`, `lastweek`, `thismonth`, `lastmonth`, `thisyear`,
+`lastyear`, `pastweek`, `pastmonth`, and `pastyear`. Calendar periods use your
+local calendar and time zone. A date alone covers that entire day. `<=date`
+includes that day, while `>date` starts the following day. Date-range endpoints
+include the entire named days. The `past…` forms end at the time of the search.
+These filters use indexed modification times; rerun the query to refresh a relative
+period after time passes.
+
+`in:` (also `infolder:`) includes descendants but excludes the scope folder itself.
+`parent:` includes direct children only. Folder paths must be absolute or start
+with `~/`; quote paths containing spaces. Match Case applies to folder lookup.
+The existing `/absolute/folder/` prefix form also benefits from tree-based lookup.
+Filters search only indexed entries and do not scan additional locations.
+Malformed recognized filters display an error in the status bar. Quote a whole token
+to search for literal text that resembles a filter, such as `"ext:pdf"`. Use
+`!"ext:pdf"` to exclude that literal text. For a negated kind filter, write `!folder:`
+or `!file:` as a separate term.
+
+The supported filters are the ones listed here. Creation-date, Finder-tag, and file-content
+filters, fuzzy matching, and parenthesized boolean grouping are not supported.
+Unrecognized `name:value` tokens are treated as ordinary search text.
+
+## Preview results and revisit searches
+
+Matching query text appears in **bold** in name/path cells. Negative terms and
+filter arguments are not highlighted. Regex searches highlight matched spans.
+
+Select one or more results and press **Space** or **⌘Y**, or choose **Quick Look**
+from the context menu or Search menu. Press **Space** or **Escape** to close the
+preview. Up/Down in the preview follows the results selection.
+
+In the search field, press **↑** to browse older searches and **↓** to return toward
+newer ones. Moving down past the newest entry restores your unfinished draft.
+Up to 50 distinct queries are saved when you press Enter, open/reveal results, or
+leave the field. History persists across launches. Use **Search → Clear Search
+History** to delete it.
+
 ## Open, reveal, or copy results
 
 Select one or more rows with the usual macOS selection gestures: **⌘-click** for
@@ -139,6 +219,7 @@ individual rows or **Shift-click** for a range.
 | Task | Action |
 | --- | --- |
 | Open with the default app | Double-click, press Return, or use **⌘O** |
+| Preview without opening the file | **Space** in results, **⌘Y**, or right-click → **Quick Look** |
 | Show Finder’s Info window | **⌘I**, or right-click → **Get Info** |
 | Reveal in Finder | **⌘R**, or right-click → **Show in Finder** |
 | Choose another app | Right-click a single result → **Open With** |
@@ -313,9 +394,13 @@ or mount the volume. Rebuild if needed.
 | Shortcut | Action |
 | --- | --- |
 | **⌥Space** (customizable) | Show/focus Everywhere while it is running and the shortcut is enabled |
+| **⌘?** | Open Everywhere Help |
+| **Escape** (syntax tips) | Dismiss tips without changing the query |
 | **⌘F** | Focus the search field |
 | **⌘K** | Clear the search and focus the field |
 | **⌘O** or **Return** | Open the selected item(s), or the first result |
+| **Space** (results) or **⌘Y** | Quick Look the selected item(s) |
+| **↑ / ↓** (search field) | Browse saved searches and restore your draft |
 | **⌘R** | Show selection in Finder |
 | **⌘I** | Get Info in Finder for the selected item(s), or the first result |
 | **⌥⌘T** | Open selection's directory in Terminal |
@@ -398,7 +483,8 @@ packed names and metadata. The cache and selected sort order prepare in the back
 while indexing is idle. Typing cancels background preparation when needed. Small file
 changes apply incrementally; large changes, external database edits, or busy indexing
 may reload the cache. Full paths are reconstructed only for each requested page.
-Regex, whole-word, and path searches continue to use the SQLite search engines.
+Metadata filters, folder scopes, regex, whole-word, and other path searches use
+SQLite-backed engines. Folder scopes narrow the indexed tree before filename matching.
 
 Turn the option off to release the cache and query SQLite directly. This uses less
 active memory, but filename searches can be slower. The operating system and SQLite
@@ -410,9 +496,10 @@ the table. Extending a plain query reuses previous matches when safe. Clearing i
 recently modified items, also loaded in pages. If the index changes between pages,
 the search restarts at its first page so rows from different snapshots are not mixed.
 
-This version uses a smaller SQLite FTS format that omits unused token-count records
-while preserving phrase searches. The schema change rebuilds older indexes on launch;
-your files are unaffected. The new index must finish rebuilding before all results return.
+SQLite FTS omits unused token-count records while preserving phrase searches.
+The current filename-cache and search-filter improvements do not change the database
+schema or require rebuilding a current index. Indexes using a schema older than
+version 4 are replaced on launch; your files are unaffected.
 
 ### Fast sorting and memory usage
 
@@ -424,7 +511,9 @@ longer while that order is prepared. Small file changes update existing sort ord
 
 **Settings → General → Search Performance** shows indexed cache items, filename-cache
 storage, and fast-sort storage. These figures estimate allocated arrays, excluding
-other app memory and temporary work. Turning memory indexing off releases the cache
+other app memory and temporary work. Identical UTF-8 names share storage; candidate
+and sort arrays use four-byte positions. Character masks skip impossible ASCII matches
+without changing results. Turning memory indexing off releases the cache
 and its sort orders through the next scheduled search.
 
 ### Exclude specific folders and name patterns
@@ -446,4 +535,4 @@ other symbols are literal. Matching folders and their descendants are also exclu
 Use **Search → Rebuild Index** after adding or removing exclusions. The rules then apply
 to the initial scan and live updates. The app's index-storage folder is always excluded.
 
-Indexes from earlier versions are rebuilt once on launch to remove duplicate paths created by folder updates. Live updates now reuse the existing indexed folder tree.
+Live folder updates reuse the existing indexed folder tree.
