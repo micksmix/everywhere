@@ -25,6 +25,20 @@ It indexes names and filesystem metadata, not document contents.
 - To bundle the offline Help book: Python 3 and [Pandoc](https://pandoc.org/installing.html) (`brew install pandoc`).
 - SQLite and the macOS frameworks supplied by the operating system; no third-party Swift packages are required.
 
+## Install with Homebrew
+
+If you use [Homebrew](https://brew.sh), install a ready-made release build from
+this project's tap:
+
+```sh
+brew tap micksmix/tap
+brew trust micksmix/tap
+brew install --cask micksmix/tap/everywhere
+```
+
+This places Everywhere.app in /Applications and picks up future releases with
+`brew upgrade`. To build from source instead, see the next section.
+
 ## Build and launch
 
 From the project directory:
@@ -53,6 +67,9 @@ Run only one copy when testing the global shortcut.
 | `make build` | Compile a release build |
 | `make app` | Build and sign `.build/Everywhere.app`, including its icon and offline Help book |
 | `make install` | Build and copy the app to Applications |
+| `make dist` | Build a universal release bundle and zip it for the GitHub release |
+| `make bump VERSION=x.y.z` | Set the release version (the Makefile is the single source) |
+| `make release VERSION=x.y.z` | Test, bump, build, tag `v`*x.y.z*, publish the GitHub release, and update the Homebrew tap |
 | `make open` | Install and launch |
 | `make run` | Run the debug executable from the terminal |
 | `make clean` | Remove build artifacts; the user index remains separate |
@@ -217,3 +234,11 @@ documents, so documentation changes ship with the app. `make run` opens the onli
 
 **Everywhere → About Everywhere** shows the Apache License 2.0 license and a link to
 [the project on GitHub](https://github.com/micksmix/everywhere).
+
+## Credits
+
+Everywhere was inspired by two excellent instant-search tools: [Everything](https://www.voidtools.com/)
+by voidtools, the classic Windows filename searcher, and [fsearch](https://github.com/cboxdoerfer/fsearch),
+a fast file-search utility for Linux that follows the same idea. They showed how an index built from
+filesystem metadata alone can make name searches feel instant. No source code from either project was
+used — Everywhere is an independent implementation for macOS.
