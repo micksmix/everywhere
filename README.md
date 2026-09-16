@@ -30,6 +30,18 @@ It indexes names and filesystem metadata, not document contents.
 - To bundle the offline Help book: Python 3 and [Pandoc](https://pandoc.org/installing.html) (`brew install pandoc`).
 - SQLite and the macOS frameworks supplied by the operating system; no third-party Swift packages are required.
 
+## Install with one command
+
+Download and install the latest release without Homebrew:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/micksmix/everywhere/main/Scripts/install.sh | sh
+```
+
+The script fetches the newest release zip from GitHub and installs it to
+/Applications. Because `curl` does not apply macOS's quarantine flag, no
+Gatekeeper prompt appears. Re-run the script to update to the latest release.
+
 ## Install with Homebrew
 
 If you use [Homebrew](https://brew.sh), install a ready-made release build from
@@ -43,6 +55,17 @@ brew install --cask micksmix/tap/everywhere
 
 This places Everywhere.app in /Applications and picks up future releases with
 `brew upgrade`. To build from source instead, see the next section.
+
+The release build is signed ad hoc and is not notarized — Everywhere is open
+source and does not participate in Apple's paid signing program. Copies that
+carry a quarantine flag (Homebrew installs, browser downloads) show a
+Gatekeeper prompt on first launch: approve it via **System Settings → Privacy
+& Security → Open Anyway**. To skip the prompt entirely, clear the quarantine
+flag after installing:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Everywhere.app
+```
 
 ## Build and launch
 
