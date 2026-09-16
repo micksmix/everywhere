@@ -66,6 +66,17 @@ struct EverywhereApp: App {
         }
         .defaultSize(width: 1100, height: 680)
         .commands {
+            CommandGroup(replacing: .help) {
+                Button("Everywhere Help") {
+                    if Bundle.main.object(forInfoDictionaryKey: "CFBundleHelpBookName") != nil {
+                        NSHelpManager.shared.registerBooks(in: Bundle.main)
+                        NSApp.showHelp(nil)
+                    } else {
+                        NSWorkspace.shared.open(URL(string: "https://github.com/micksmix/everywhere/blob/main/docs/USER_GUIDE.md")!)
+                    }
+                }
+                .keyboardShortcut("?", modifiers: .command)
+            }
             SearchCommands(viewModel: viewModel, indexService: indexService, settings: settings)
         }
 
@@ -121,6 +132,12 @@ struct SearchCommands: Commands {
                 viewModel.openSelection()
             }
             .keyboardShortcut("o", modifiers: .command)
+
+            Button("Get Info") {
+                viewModel.showInfo(viewModel.selectedEntries)
+            }
+            .keyboardShortcut("i", modifiers: .command)
+            .disabled(viewModel.selectedEntries.isEmpty)
 
             Button("Open in Terminal") {
                 viewModel.openInTerminal(viewModel.selectedEntries)

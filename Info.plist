@@ -31,7 +31,11 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>Copyright © 2026. MIT License.</string>
+	<string>Copyright © 2026. Apache License 2.0.</string>
+	<key>CFBundleHelpBookFolder</key>
+	<string>Everywhere.help</string>
+	<key>CFBundleHelpBookName</key>
+	<string>app.everywhere.macos.help</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

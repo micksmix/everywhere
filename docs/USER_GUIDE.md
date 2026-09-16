@@ -2,6 +2,12 @@
 
 [Project overview and installation](../README.md)
 
+Choose **Help → Everywhere Help** or press **⌘?** to open this guide in macOS Help Viewer.
+The installed app includes offline help, installation information, performance notes,
+and the Apache License 2.0 text. When running with `make run`, Help opens the online guide.
+Choose **Everywhere → About Everywhere** for license information and the
+[project website](https://github.com/micksmix/everywhere).
+
 ## Common tasks
 
 - [Open or return to Everywhere](#open-or-return-to-everywhere)
@@ -20,7 +26,10 @@
 ## Open or return to Everywhere
 
 Launch Everywhere from Applications, or from the app bundle you built.
-Everywhere runs in the menu bar without a Dock icon or an entry in the **⌘Tab** app switcher.
+Everywhere stays in the menu bar when all its windows are closed. While a search or
+Settings window is open, it appears in the Dock and **⌘Tab** app switcher, and its
+normal menus appear at the top of the screen when Everywhere is active. Closing the
+last window removes the Dock and app-switcher entries.
 While the app is running, press your global shortcut (default: **⌥Space**) or click its menu-bar icon.
 A double-click also works. Everywhere brings its existing window forward, restores it
 if minimized, or creates a window if one is unavailable.
@@ -43,7 +52,7 @@ Use **Reset to ⌥ Space** to restore the default. Keys refer to their US keyboa
 ## Find a file or folder
 
 1. Press **⌘F** to focus the search field.
-2. Type a name, such as `report`. Results update after a short typing delay.
+2. Type a name, such as `report`. Searching starts immediately as you type.
 3. Choose **All**, **Folders**, or **Files** beside the search controls.
 4. Click a result column heading to sort the search results; click again to reverse the order. The column and direction are saved across launches.
 5. Drag column boundaries to resize them. The app saves the column layout.
@@ -51,9 +60,11 @@ Use **Reset to ⌥ Space** to restore the default. Keys refer to their US keyboa
 Simple name searches match literal fragments anywhere in a name: `port` finds
 `report.pdf`, and `.pas` finds names containing `.pas`, including the dot.
 
-The table displays up to 10,000 results. Narrow the query if you need a smaller list.
+The table loads 200 results initially and adds pages as you scroll. The status bar shows
+loaded rows, the full match count, and request-to-publication time (excluding table drawing).
 Clearing the search with its **×** button or **⌘K** returns to recently modified items. This empty-search view
-uses modification order; use a nonempty query when applying result sorting and kind filters.
+uses modification order and respects the All/Files/Folders filter; use a nonempty query
+when applying other result sorting.
 
 Everywhere searches names and paths, not the text inside documents.
 
@@ -124,6 +135,7 @@ individual rows or **Shift-click** for a range.
 | Task | Action |
 | --- | --- |
 | Open with the default app | Double-click, press Return, or use **⌘O** |
+| Show Finder’s Info window | **⌘I**, or right-click → **Get Info** |
 | Reveal in Finder | **⌘R**, or right-click → **Show in Finder** |
 | Choose another app | Right-click a single result → **Open With** |
 | Open a directory in Terminal | **⌥⌘T**, or right-click → **Open in Terminal** |
@@ -138,7 +150,9 @@ opening folder URLs. Launch errors are shown in an alert.
 For a file, Open in Terminal uses its containing directory. Copied names or paths from
 multiple selections are separated by newlines. Open actions handle up to ten items at
 once; Open in Terminal handles up to five. With no explicit selection, keyboard open
-and reveal actions use the first result.
+and reveal actions use the first result. **Get Info** opens Finder’s own information
+windows for up to ten selected files or folders, or the first result if nothing is
+selected. It is also available in the **Search** menu and leaves your clipboard unchanged.
 
 ## Choose indexed folders
 
@@ -299,6 +313,7 @@ or mount the volume. Rebuild if needed.
 | **⌘K** | Clear the search and focus the field |
 | **⌘O** or **Return** | Open the selected item(s), or the first result |
 | **⌘R** | Show selection in Finder |
+| **⌘I** | Get Info in Finder for the selected item(s), or the first result |
 | **⌥⌘T** | Open selection's directory in Terminal |
 | **⌥⌘C** | Toggle Match Case |
 | **⌥⌘W** | Toggle Match Whole Words |
@@ -374,10 +389,12 @@ You can still use **Choose Application…** to browse manually.
 ### Search memory and database format
 
 **Settings → General → Search Performance → Keep filename index in memory** is on
-by default. It speeds up repeated plain filename searches by caching packed names
-and metadata. The cache loads on the first such search and applies small file changes
-incrementally. Large changes, external database edits, or busy indexing may reload it. Full paths are reconstructed only for displayed matches. Regex, whole-word,
-wildcard, and path searches continue to use the SQLite search engines.
+by default. It speeds up plain filename, wildcard, OR, and negated searches by caching
+packed names and metadata. The cache and selected sort order prepare in the background
+while indexing is idle. Typing cancels background preparation when needed. Small file
+changes apply incrementally; large changes, external database edits, or busy indexing
+may reload the cache. Full paths are reconstructed only for each requested page.
+Regex, whole-word, and path searches continue to use the SQLite search engines.
 
 Turn the option off to release the cache and query SQLite directly. This uses less
 active memory, but filename searches can be slower. The operating system and SQLite
@@ -385,7 +402,9 @@ still use their own caches; this option does not mean zero memory use. Choices a
 immediately and persist across launches.
 
 Typing or clearing a query cancels obsolete work, and only the newest search updates
-the table. The empty query shows up to 10,000 recently modified indexed items.
+the table. Extending a plain query reuses previous matches when safe. Clearing it shows
+recently modified items, also loaded in pages. If the index changes between pages,
+the search restarts at its first page so rows from different snapshots are not mixed.
 
 This version uses a smaller SQLite FTS format that omits unused token-count records
 while preserving phrase searches. The schema change rebuilds older indexes on launch;
@@ -393,7 +412,8 @@ your files are unaffected. The new index must finish rebuilding before all resul
 
 ### Fast sorting and memory usage
 
-Broad filename searches automatically build and reuse sort orders. Up to three
+The selected sort order prepares in the background after searches while indexing is
+idle; broad filename searches can also build it on demand. Up to three
 column/direction combinations are kept; less-used orders are released. Selective
 queries sort just their matches. The first broad query in a new sort order can take
 longer while that order is prepared. Small file changes update existing sort orders.

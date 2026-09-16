@@ -22,6 +22,9 @@ final class FilenameIndex {
     }
     private var sortOrders: [Ordering: [Int]] = [:]
     private var recentOrders: [Ordering] = []
+    private var previousRequest: SearchRequest?
+    private var previousTerms: [String]?
+    private var previousMatches: [Int] = []
     private var deadRows = 0
     private var unusedNameBytes = 0
 
@@ -31,7 +34,7 @@ final class FilenameIndex {
 
     var statistics: SearchCacheStatistics {
         SearchCacheStatistics(itemCount: rows.count - deadRows,
-                              storageBytes: rows.capacity * MemoryLayout<Row>.stride + names.capacity + idOrder.capacity * MemoryLayout<Int>.stride,
+                              storageBytes: rows.capacity * MemoryLayout<Row>.stride + names.capacity + (idOrder.capacity + previousMatches.capacity) * MemoryLayout<Int>.stride,
                               sortBytes: sortOrders.values.reduce(0) { $0 + $1.capacity * MemoryLayout<Int>.stride },
                               sortCount: sortOrders.count)
     }
@@ -71,66 +74,85 @@ final class FilenameIndex {
         String(decoding: names[row.nameOffset..<(row.nameOffset + Int(row.nameLength))], as: UTF8.self)
     }
 
-    func matches(terms: [String], request: SearchRequest, cancellation: SearchCancellation?,
-                 visit: (Int) -> Void) throws {
-        let needles = terms.map { Array($0.utf8) }
-        let asciiTerms = needles.allSatisfy { $0.allSatisfy { $0 < 128 } }
-        try names.withUnsafeBufferPointer { bytes in
-            for (offset, row) in rows.enumerated() {
-                if offset % 256 == 0 { try cancellation?.check() }
-                guard row.id != 0, request.includeHidden || bytes[row.nameOffset] != 46,
-                      request.kind != .files || !row.isDirectory,
-                      request.kind != .folders || row.isDirectory else { continue }
-                if row.isASCII && asciiTerms {
-                    let start = bytes.baseAddress!.advanced(by: row.nameOffset)
-                    if needles.allSatisfy({ Self.contains(start, count: Int(row.nameLength), needle: $0, matchCase: request.matchCase) }) {
-                        visit(offset)
-                    }
-                } else {
-                    let name = name(for: row)
-                    let subject = request.matchCase ? name : name.lowercased()
-                    if terms.allSatisfy({ subject.contains($0) }) { visit(offset) }
+    func prepareSort(key: SortKey, ascending: Bool, cancellation: SearchCancellation?) throws {
+        let ordering = Ordering(key: key, ascending: ascending)
+        if sortOrders[ordering] != nil { return }
+        let sorted = try sortedIndices(idOrder, ordering: ordering, cancellation: cancellation)
+        if recentOrders.count == 3, let oldest = recentOrders.first {
+            sortOrders[oldest] = nil
+            recentOrders.removeFirst()
+        }
+        recentOrders.append(ordering)
+        sortOrders[ordering] = sorted
+    }
+
+    func select(request: SearchRequest, cancellation: SearchCancellation?) throws -> (rows: [(Row, String)], total: Int) {
+        let query = NameQuery(request)
+        var reuse = false
+        var identical = false
+        if let previous = previousRequest,
+           previous.kind == request.kind, previous.includeHidden == request.includeHidden,
+           previous.matchCase == request.matchCase, previous.wholeWord == request.wholeWord {
+            identical = previous.text == request.text
+            if identical {
+                reuse = true
+            } else if let old = previousTerms, let new = query.literalTerms {
+                reuse = old.allSatisfy { term in new.contains { $0.contains(term) } }
+            }
+        }
+        var matches: [Int] = []
+        if identical {
+            matches = previousMatches
+        } else {
+            let candidates = reuse ? previousMatches : idOrder
+            try names.withUnsafeBufferPointer { bytes in
+                for (offset, index) in candidates.enumerated() {
+                    if offset % 256 == 0 { try cancellation?.check() }
+                    let row = rows[index]
+                    guard request.includeHidden || bytes[row.nameOffset] != 46,
+                          request.kind != .files || !row.isDirectory,
+                          request.kind != .folders || row.isDirectory else { continue }
+                    let name = UnsafeBufferPointer(start: bytes.baseAddress!.advanced(by: row.nameOffset), count: Int(row.nameLength))
+                    if query.matches(bytes: name, isASCII: row.isASCII) { matches.append(index) }
                 }
             }
         }
-    }
-
-    func select(terms: [String], request: SearchRequest, cancellation: SearchCancellation?) throws -> (rows: [(Row, String)], total: Int) {
-        var matches: [Int] = []
-        try self.matches(terms: terms, request: request, cancellation: cancellation) { matches.append($0) }
-        let total = matches.count
         let ordering = Ordering(key: request.sortKey, ascending: request.ascending)
-        let limit = max(1, min(request.limit, 100_000))
-        if sortOrders[ordering] == nil && total >= max(1024, (rows.count - deadRows) / 4) {
-            let sorted = try sortedIndices(idOrder, ordering: ordering, cancellation: cancellation)
-            if recentOrders.count == 3, let oldest = recentOrders.first {
-                sortOrders[oldest] = nil
-                recentOrders.removeFirst()
+        let alreadySorted = reuse && previousRequest?.sortKey == request.sortKey && previousRequest?.ascending == request.ascending
+        if !alreadySorted {
+            if sortOrders[ordering] == nil && matches.count >= max(1024, (rows.count - deadRows) / 4) {
+                try prepareSort(key: request.sortKey, ascending: request.ascending, cancellation: cancellation)
             }
-            sortOrders[ordering] = sorted
+            if let order = sortOrders[ordering] {
+                recentOrders.removeAll { $0 == ordering }
+                recentOrders.append(ordering)
+                var flags = [UInt64](repeating: 0, count: (rows.count + 63) / 64)
+                for (offset, index) in matches.enumerated() {
+                    if offset % 1024 == 0 { try cancellation?.check() }
+                    flags[index / 64] |= UInt64(1) << (index % 64)
+                }
+                matches.removeAll(keepingCapacity: true)
+                for (offset, index) in order.enumerated() {
+                    if offset % 1024 == 0 { try cancellation?.check() }
+                    if flags[index / 64] & (UInt64(1) << (index % 64)) != 0 { matches.append(index) }
+                }
+            } else {
+                matches = try sortedIndices(matches, ordering: ordering, cancellation: cancellation)
+            }
         }
-        if let order = sortOrders[ordering] {
-            recentOrders.removeAll { $0 == ordering }
-            recentOrders.append(ordering)
-            var flags = [UInt64](repeating: 0, count: (rows.count + 63) / 64)
-            for (offset, index) in matches.enumerated() {
-                if offset % 1024 == 0 { try cancellation?.check() }
-                flags[index / 64] |= UInt64(1) << (index % 64)
-            }
-            matches.removeAll(keepingCapacity: false)
-            for (offset, index) in order.enumerated() {
-                if offset % 1024 == 0 { try cancellation?.check() }
-                if flags[index / 64] & (UInt64(1) << (index % 64)) != 0 { matches.append(index) }
-                if matches.count == limit { break }
-            }
-        } else {
-            matches = try sortedIndices(matches, ordering: ordering, cancellation: cancellation)
-        }
-        return (matches.prefix(limit).map { (rows[$0], name(for: rows[$0])) }, total)
+        try cancellation?.check()
+        previousRequest = request
+        previousTerms = query.literalTerms
+        previousMatches = matches
+        let page = matches.dropFirst(max(0, request.offset)).prefix(max(1, min(request.limit, 100_000)))
+        return (page.map { (rows[$0], name(for: rows[$0])) }, matches.count)
     }
 
     func apply(changedIDs: Set<Int64>, replacements: [Int64: IndexRow], cancellation: SearchCancellation?) throws {
         guard !changedIDs.isEmpty else { return }
+        previousRequest = nil
+        previousTerms = nil
+        previousMatches = []
         let positions = Dictionary(uniqueKeysWithValues: changedIDs.compactMap { id in position(for: id).map { (id, $0) } })
         var touched = Set<Int>()
         var live: [Int] = []
@@ -257,19 +279,4 @@ final class FilenameIndex {
         return result
     }
 
-    private static func contains(_ bytes: UnsafePointer<UInt8>, count: Int, needle: [UInt8], matchCase: Bool) -> Bool {
-        guard !needle.isEmpty else { return true }
-        guard needle.count <= count else { return false }
-        for offset in 0...(count - needle.count) {
-            var index = 0
-            while index < needle.count {
-                let byte = bytes[offset + index]
-                let folded = !matchCase && byte >= 65 && byte <= 90 ? byte + 32 : byte
-                if folded != needle[index] { break }
-                index += 1
-            }
-            if index == needle.count { return true }
-        }
-        return false
-    }
 }

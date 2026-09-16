@@ -10,7 +10,7 @@ It indexes names and filesystem metadata, not document contents.
 - Search as you type, with case, whole-word, path, regex, and hidden-file controls beside the search field.
 - All, Folders, and Files filters; sortable results and saved column layouts.
 - Open files, reveal them in Finder, choose an application, open a directory in your default terminal, and copy names or paths.
-- Runs in the menu bar without a Dock icon, with a configurable global shortcut (default: **⌥Space**; change it in **Settings → General**).
+- Runs in the menu bar when its windows are closed; open windows have normal app menus, a Dock icon, and a ⌘Tab entry. Includes a configurable global shortcut (default: **⌥Space**; change it in **Settings → General**).
 - Optional **Launch on Startup** in **Settings → General → Startup** opens Everywhere automatically when you log in. Enable it from the installed app; if macOS requests approval, use **Open Login Items…**.
 - Search the saved index on launch, with a configurable 120-second indexing countdown.
 - Pause/resume the countdown or scan, or disable indexing entirely in Settings.
@@ -22,6 +22,7 @@ It indexes names and filesystem metadata, not document contents.
 - macOS 13 or later.
 - To build: a Swift 5.9 or newer toolchain, a macOS SDK, and Apple's command-line build tools.
   The package uses Swift 5 language mode.
+- To bundle the offline Help book: Python 3 and [Pandoc](https://pandoc.org/installing.html) (`brew install pandoc`).
 - SQLite and the macOS frameworks supplied by the operating system; no third-party Swift packages are required.
 
 ## Build and launch
@@ -50,7 +51,7 @@ Run only one copy when testing the global shortcut.
 | --- | --- |
 | `make test` | Run the XCTest suite |
 | `make build` | Compile a release build |
-| `make app` | Build and sign `.build/Everywhere.app`, including its icon |
+| `make app` | Build and sign `.build/Everywhere.app`, including its icon and offline Help book |
 | `make install` | Build and copy the app to Applications |
 | `make open` | Install and launch |
 | `make run` | Run the debug executable from the terminal |
@@ -171,10 +172,18 @@ You can still use **Choose Application…** to browse manually.
 ### Faster filename searches
 
 **Settings → General → Search Performance** includes **Keep filename index in memory**,
-enabled by default. It caches packed names and metadata for plain substring searches;
+enabled by default. It caches packed names and metadata for substring, wildcard, OR, and
+negated filename searches;
 turn it off to use less active memory and query SQLite directly, which can be slower.
-The cache loads on demand and applies small index changes incrementally. Advanced query modes
-continue to use SQLite. Full paths are not retained in the memory cache.
+The cache and selected sort order warm in the background while indexing is idle, and
+small index changes apply incrementally. Regex, whole-word, and path queries continue
+to use SQLite. Full paths are not retained in the memory cache.
+
+Searches start immediately as you type. The first 200 results appear before more rows
+load as you scroll, with an exact match count and no 10,000-result table cap. Narrowing
+a plain query reuses its previous matches when the index and filters are unchanged.
+The status time measures request-to-publication latency, including scheduling, but not
+table drawing.
 
 Plain searches now preserve punctuation and find fragments anywhere in a name. Clearing the search with **×** or **⌘K**
 restores the recent-items view, and newer searches cancel obsolete work.
@@ -194,3 +203,17 @@ Performance** shows estimated filename-cache and sort-array memory use.
 substring exclusions still work separately. Rebuild the index after changing exclusions.
 
 Indexes from earlier versions are rebuilt once on launch to remove duplicate paths created by folder updates. Live updates now reuse the existing indexed folder tree.
+
+Select a result and press **⌘I**, or right-click → **Get Info**, to open Finder’s own
+information window. Get Info is also in the Search menu and supports up to ten selected
+files or folders without changing the clipboard.
+
+### Built-in help and license
+
+Choose **Help → Everywhere Help** (or **⌘?**) to read the user guide in macOS Help Viewer.
+The bundled help works offline and includes the overview, installation steps, search
+performance notes, and Apache License 2.0. `make app` regenerates it from the Markdown
+documents, so documentation changes ship with the app. `make run` opens the online guide instead.
+
+**Everywhere → About Everywhere** shows the Apache License 2.0 license and a link to
+[the project on GitHub](https://github.com/micksmix/everywhere).

@@ -518,7 +518,7 @@ final class DatabaseTests: XCTestCase {
             try tree.add(path: "/dir/file\(i).txt")
         }
         let result = try db.search(SearchRequest(text: "", limit: 10_000))
-        XCTAssertEqual(result.total, 102)
+        XCTAssertEqual(result.total, 101)
         XCTAssertEqual(result.entries.count, 101)
     }
 
@@ -651,5 +651,114 @@ final class DatabaseTests: XCTestCase {
 
         let partial = try db.search(SearchRequest(text: "man", wholeWord: false))
         XCTAssertEqual(partial.entries.count, 2)
+    }
+}
+
+extension DatabaseTests {
+    func testPagedSearchMatchesCompleteResultsAcrossEngines() throws {
+        for index in 0..<47 {
+            try tree.add(path: "/group/file-\(index).txt", size: Int64(index % 5), modified: Double(index % 7))
+        }
+        try tree.add(path: "/group/.file-hidden.txt")
+        for memory in [false, true] {
+            for text in ["", "file", "*.txt", "file-1 | file-2", "!file-1", "/group/ file"] {
+                for key in [SortKey.name, .size, .modified, .kind, .path] {
+                    for ascending in [true, false] {
+                        var request = SearchRequest(text: text, kind: .files, includeHidden: false, sortKey: key, ascending: ascending)
+                        let complete = try db.search(request, useMemory: memory)
+                        var entries: [Entry] = []
+                        request.limit = 7
+                        repeat {
+                            request.offset = entries.count
+                            let page = try db.search(request, useMemory: memory)
+                            XCTAssertEqual(page.total, complete.total, text)
+                            XCTAssertEqual(page.snapshotVersion, complete.snapshotVersion)
+                            entries += page.entries
+                            if page.entries.isEmpty { break }
+                        } while entries.count < complete.total
+                        XCTAssertEqual(entries, complete.entries, "\(text) \(key) \(ascending)")
+                    }
+                }
+            }
+        }
+        for regex in [false, true] {
+            for matchCase in [false, true] {
+                var request = SearchRequest(text: regex ? "file-[0-9]+" : "file", kind: .files, includeHidden: false,
+                                            useRegex: regex, matchCase: matchCase, wholeWord: !regex, limit: 7)
+                let first = try db.search(request)
+                request.offset = 7
+                let second = try db.search(request)
+                XCTAssertEqual(first.total, 47)
+                XCTAssertEqual(second.total, 47)
+                XCTAssertTrue(Set(first.entries.map(\.id)).isDisjoint(with: second.entries.map(\.id)))
+                XCTAssertEqual(second.entries.count, 7)
+            }
+        }
+    }
+
+    func testNarrowingAndPagingInvalidateAfterChanges() throws {
+        for name in ["report.txt", "report-final.txt", "receipt.txt", "Résumé.txt", "résumé-final.txt"] {
+            try tree.add(path: "/\(name)")
+        }
+        try db.prepareSearchIndex()
+        for text in ["re", "rep", "report", "report final", "re", "receipt", "rés", "résumé", "rés", "RE", "report | receipt", "report"] {
+            let memory = try db.search(SearchRequest(text: text, limit: 2), useMemory: true)
+            let other = try makeDatabase()
+            let disk = try other.search(SearchRequest(text: text, limit: 2))
+            XCTAssertEqual(memory.entries, disk.entries, text)
+            XCTAssertEqual(memory.total, disk.total, text)
+        }
+        let before = try db.search(SearchRequest(text: "report"), useMemory: true)
+        try tree.add(path: "/report-new.txt")
+        let after = try db.search(SearchRequest(text: "report"), useMemory: true)
+        XCTAssertNotEqual(before.snapshotVersion, after.snapshotVersion)
+        XCTAssertEqual(after.total, before.total + 1)
+        let token = SearchCancellation()
+        token.cancel()
+        XCTAssertThrowsError(try db.prepareSearchIndex(sortKey: .size, cancellation: token))
+        XCTAssertEqual(try db.search(SearchRequest(text: "report-new"), useMemory: true).total, 1)
+    }
+
+    func testWildcardAndBooleanMemoryParityWithUnicode() throws {
+        for name in ["REPORT.txt", "report-final.txt", "Résumé.txt", "résumé-final.txt", "İstanbul.txt", "a\nb.txt", ".secret.txt", "a[1].txt", "😀.txt"] {
+            try tree.add(path: "/\(name)")
+        }
+        let disk = try makeDatabase()
+        for text in ["*.txt", "r*.txt !*final*", "report | résumé", "!*.txt", "?.txt", "a[1].*", "* | résumé", "résumé*", "i*", "report |", "*?*?*.txt"] {
+            for sensitive in [false, true] {
+                for hidden in [false, true] {
+                    let request = SearchRequest(text: text, includeHidden: hidden, matchCase: sensitive)
+                    let expected = try disk.search(request)
+                    let actual = try db.search(request, useMemory: true)
+                    XCTAssertEqual(actual.entries, expected.entries, text)
+                    XCTAssertEqual(actual.total, expected.total, text)
+                }
+            }
+        }
+        XCTAssertEqual(try db.search(SearchRequest(text: "a[1].*"), useMemory: true).entries.map(\.name), ["a[1].txt"])
+        XCTAssertEqual(try db.search(SearchRequest(text: "r*.txt !*final*"), useMemory: true).total, 2)
+    }
+
+    func testASCIIGlobAgreesWithRegexSemantics() throws {
+        let names = ["", "a", "ab", "aab", "A.b", "abcd.txt"] + (0..<128).map { "a" + String(UnicodeScalar($0)!) + "b" }
+        for pattern in ["*", "?", "a*b", "a?b", "*a*b*", "a**?*b", "*.txt", "a.b"] {
+            let expression = "^" + pattern.map { c in c == "*" ? ".*" : c == "?" ? "." : NSRegularExpression.escapedPattern(for: String(c)) }.joined() + "$"
+            let regex = try NSRegularExpression(pattern: expression, options: [.caseInsensitive])
+            let query = NameQuery(SearchRequest(text: pattern))
+            for name in names where pattern.contains("*") || pattern.contains("?") {
+                let expected = regex.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)) != nil
+                XCTAssertEqual(query.matches(name), expected, "\(pattern): \(name.debugDescription)")
+            }
+        }
+    }
+}
+
+extension DatabaseTests {
+    func testRegexPaginationFiltersBeforeLimitingCandidates() throws {
+        for index in 0..<40 { try tree.add(path: "/report-\(index)-no.txt") }
+        try tree.add(path: "/report-999-yes.txt")
+        let result = try db.search(SearchRequest(text: "report-[0-9]+-yes", useRegex: true, limit: 1))
+        XCTAssertEqual(result.entries.map(\.name), ["report-999-yes.txt"])
+        XCTAssertEqual(result.total, 1)
     }
 }

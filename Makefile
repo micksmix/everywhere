@@ -1,5 +1,6 @@
 APP_NAME := Everywhere
 CONFIG ?= release
+PYTHON ?= python3
 VERSION := 1.0.0
 BUNDLE_ID := app.everywhere.macos
 BIN_DIR := $(shell swift build -c $(CONFIG) --show-bin-path)
@@ -26,6 +27,8 @@ app: build Resources/AppIcon.icns
 	@plutil -replace CFBundleIdentifier -string "$(BUNDLE_ID)" "$(APP_DIR)/Contents/Info.plist"
 	@cp "$(BIN_DIR)/$(APP_NAME)" "$(APP_DIR)/Contents/MacOS/$(APP_NAME)"
 	@cp Resources/AppIcon.icns "$(APP_DIR)/Contents/Resources/AppIcon.icns"
+	@cp Resources/Credits.html LICENSE "$(APP_DIR)/Contents/Resources/"
+	$(PYTHON) Scripts/make-help.py "$(APP_DIR)/Contents/Resources/Everywhere.help"
 	@codesign --force --sign - "$(APP_DIR)"
 	@touch "$(APP_DIR)"
 	@echo "Built $(APP_DIR)"

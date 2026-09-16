@@ -66,6 +66,7 @@ public struct SearchRequest: Equatable, Sendable {
     public var wholeWord: Bool
     public var sortKey: SortKey
     public var ascending: Bool
+    public var offset: Int
     public var limit: Int
 
     public init(text: String = "",
@@ -77,7 +78,8 @@ public struct SearchRequest: Equatable, Sendable {
                 wholeWord: Bool = false,
                 sortKey: SortKey = .name,
                 ascending: Bool = true,
-                limit: Int = 10_000) {
+                limit: Int = 10_000,
+                offset: Int = 0) {
         self.text = text
         self.kind = kind
         self.includeHidden = includeHidden
@@ -88,6 +90,7 @@ public struct SearchRequest: Equatable, Sendable {
         self.sortKey = sortKey
         self.ascending = ascending
         self.limit = limit
+        self.offset = offset
     }
 }
 
@@ -113,6 +116,7 @@ public struct SearchResult: Sendable {
     public var entries: [Entry]
     public var total: Int
     public var elapsedMS: Double
+    public var snapshotVersion: Int64 = 0
     public var cacheStatistics = SearchCacheStatistics()
 
     public init(entries: [Entry], total: Int, elapsedMS: Double) {

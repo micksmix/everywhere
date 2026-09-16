@@ -4,6 +4,7 @@ import EverywhereCore
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private weak var mainWindow: NSWindow?
+    private let closingWindows = NSHashTable<NSWindow>.weakObjects()
     private var openMainWindow: (() -> Void)?
     private var viewModel: ContentViewModel?
     private var indexService: IndexService?
@@ -29,6 +30,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        NotificationCenter.default.addObserver(self, selector: #selector(windowBecameKey(_:)),
+                                               name: NSWindow.didBecomeKeyNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(windowWillClose(_:)),
+                                               name: NSWindow.willCloseNotification, object: nil)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func windowBecameKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window.canBecomeMain, window.isVisible, NSApp.windows.contains(window) else { return }
+        closingWindows.remove(window)
+        if NSApp.activationPolicy() != .regular { activateWindowMode() }
+    }
+
+    @objc private func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window.canBecomeMain else { return }
+        closingWindows.add(window)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let hasOpenWindow = NSApp.windows.contains {
+                !self.closingWindows.contains($0) && $0.canBecomeMain && ($0.isVisible || $0.isMiniaturized)
+            }
+            if !hasOpenWindow { NSApp.setActivationPolicy(.accessory) }
+        }
+    }
+
+    private func activateWindowMode() {
+        let changed = NSApp.activationPolicy() != .regular
+        if changed { NSApp.setActivationPolicy(.regular) }
+        NSApp.activate(ignoringOtherApps: true)
+        if changed {
+            DispatchQueue.main.async {
+                if NSApp.activationPolicy() == .regular { NSApp.activate(ignoringOtherApps: true) }
+            }
+        }
     }
 
     func registerSettingsAction(_ action: @escaping () -> Void) {
@@ -64,11 +103,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.addTitlebarAccessoryViewController(accessory)
         }
         mainWindow = window
+        if window.isVisible { activateWindowMode() }
     }
 
     func showMainWindow() {
-        NSApp.activate(ignoringOtherApps: true)
+        activateWindowMode()
         if let window = mainWindow, NSApp.windows.contains(window) {
+            closingWindows.remove(window)
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
         } else {

@@ -58,7 +58,7 @@ struct SettingsView: View {
             } header: {
                 Text("Startup")
             } footer: {
-                Text("Launch Everywhere automatically when you log in to your Mac. Everywhere runs in the menu bar without a Dock icon.")
+                Text("Launch Everywhere automatically when you log in to your Mac. Everywhere stays in the menu bar when its windows are closed.")
                 if !launchAtLogin.isAppBundle {
                     Text("Open the Everywhere app from Applications to change this setting.")
                 }

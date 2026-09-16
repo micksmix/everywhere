@@ -628,6 +628,17 @@ public final class Database: @unchecked Sendable {
 
     public func search(_ request: SearchRequest, useMemory: Bool = false,
                        cancellation: SearchCancellation = SearchCancellation()) throws -> SearchResult {
+        try performSearch(request, useMemory: useMemory, cancellation: cancellation, preparing: false)
+    }
+
+    public func prepareSearchIndex(sortKey: SortKey = .name, ascending: Bool = true,
+                                   cancellation: SearchCancellation = SearchCancellation()) throws {
+        _ = try performSearch(SearchRequest(sortKey: sortKey, ascending: ascending), useMemory: true,
+                              cancellation: cancellation, preparing: true)
+    }
+
+    private func performSearch(_ request: SearchRequest, useMemory: Bool,
+                               cancellation: SearchCancellation, preparing: Bool) throws -> SearchResult {
         searchLock.lock()
         defer { searchLock.unlock() }
         try cancellation.check()
@@ -654,23 +665,34 @@ public final class Database: @unchecked Sendable {
         }
 
         let result: SearchResult
-        if request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if preparing {
+            try refreshMemoryIndex()
+            try memoryRows?.prepareSort(key: request.sortKey, ascending: request.ascending, cancellation: cancellation)
+            result = SearchResult(entries: [], total: 0, elapsedMS: 0)
+        } else if request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             result = try recentItems(request)
         } else if useRegex && request.matchPath {
             result = try scanSearch(request, useRegex: true)
         } else if useRegex {
             result = try regexSearch(request)
-        } else if isLiteralNameQuery(request) {
-            result = try literalNameSearch(request, useMemory: useMemory)
+        } else if isNameQuery(request), !request.wholeWord {
+            result = try nameSearch(request, useMemory: useMemory)
         } else if let match = ftsQueryFor(request) {
             result = try ftsSearch(request, match: match)
         } else {
             result = try scanSearch(request, useRegex: false)
         }
 
+        var versionStatement: OpaquePointer?
+        guard sqlite3_prepare_v2(searchReader, "PRAGMA data_version", -1, &versionStatement, nil) == SQLITE_OK,
+              let versionStatement else { throw DatabaseError.sql(Self.errorMessage(searchReader), sql: "PRAGMA data_version") }
+        defer { sqlite3_finalize(versionStatement) }
+        _ = try stepSearch(versionStatement)
+        let snapshotVersion = sqlite3_column_int64(versionStatement, 0)
         try cancellation.check()
         let elapsed = (CFAbsoluteTimeGetCurrent() - started) * 1000
         var completed = SearchResult(entries: result.entries, total: result.total, elapsedMS: elapsed)
+        completed.snapshotVersion = snapshotVersion
         completed.cacheStatistics = memoryRows?.statistics ?? SearchCacheStatistics()
         completed.cacheStatistics.fullLoads = memoryFullLoads
         completed.cacheStatistics.incrementalRefreshes = memoryIncrementalRefreshes
@@ -771,17 +793,14 @@ public final class Database: @unchecked Sendable {
         return status
     }
 
-    private func isLiteralNameQuery(_ request: SearchRequest) -> Bool {
-        guard !request.useRegex, !request.matchPath, !request.wholeWord else { return false }
-        let parsed = SearchQueryParser.parse(request.text)
-        return parsed.groups.count == 1 && !parsed.groups[0].terms.isEmpty &&
-            parsed.groups[0].terms.allSatisfy { !$0.isNegated && !$0.hasWildcards && !$0.hasPathSeparator }
+    private func isNameQuery(_ request: SearchRequest) -> Bool {
+        !request.useRegex && !request.matchPath && !SearchQueryParser.parse(request.text).groups.contains {
+            $0.terms.contains { $0.hasPathSeparator }
+        }
     }
 
-    private func literalNameSearch(_ request: SearchRequest, useMemory: Bool) throws -> SearchResult {
-        let terms = SearchQueryParser.parse(request.text).groups[0].terms.map {
-            request.matchCase ? $0.text : $0.text.lowercased()
-        }
+    private func nameSearch(_ request: SearchRequest, useMemory: Bool) throws -> SearchResult {
+        let query = NameQuery(request)
         let limit = max(1, min(request.limit, 100_000))
         var matched: [BareRow] = []
         func consider(_ row: BareRow) {
@@ -789,13 +808,12 @@ public final class Database: @unchecked Sendable {
                   request.includeHidden || !row.name.hasPrefix("."),
                   request.kind != .files || !row.isDir,
                   request.kind != .folders || row.isDir else { return }
-            let name = request.matchCase ? row.name : row.name.lowercased()
-            if terms.allSatisfy({ name.contains($0) }) { matched.append(row) }
+            if query.matches(row.name) { matched.append(row) }
         }
         if useMemory {
             try refreshMemoryIndex()
             guard let memoryRows else { return SearchResult(entries: [], total: 0, elapsedMS: 0) }
-            let selected = try memoryRows.select(terms: terms, request: request, cancellation: searchCancellation)
+            let selected = try memoryRows.select(request: request, cancellation: searchCancellation)
             let paths = try materializePaths(ids: selected.rows.map { $0.0.id })
             let entries = selected.rows.map { row, name in
                 Entry(id: row.id, path: paths[row.id] ?? name, name: name, isDirectory: row.isDirectory,
@@ -811,6 +829,18 @@ public final class Database: @unchecked Sendable {
             defer { sqlite3_finalize(statement) }
             while try stepSearch(statement) == SQLITE_ROW { consider(Self.bareRow(statement)) }
         }
+        matched = try sortedRows(matched, request: request)
+        let rows = Array(matched.dropFirst(max(0, request.offset)).prefix(limit))
+        let paths = try materializePaths(ids: rows.map(\.id))
+        let entries = rows.map { row in
+            Entry(id: row.id, path: paths[row.id] ?? row.name, name: row.name, isDirectory: row.isDir,
+                  size: row.size, modified: Date(timeIntervalSince1970: row.modified))
+        }
+        return SearchResult(entries: entries, total: matched.count, elapsedMS: 0)
+    }
+
+    private func sortedRows(_ rows: [BareRow], request: SearchRequest) throws -> [BareRow] {
+        var matched = rows
         try searchCancellation?.check()
         var comparisons = 0
         try matched.sort { left, right in
@@ -834,13 +864,7 @@ public final class Database: @unchecked Sendable {
             return order == (request.ascending ? .orderedAscending : .orderedDescending)
         }
         try searchCancellation?.check()
-        let rows = Array(matched.prefix(limit))
-        let paths = try materializePaths(ids: rows.map(\.id))
-        let entries = rows.map { row in
-            Entry(id: row.id, path: paths[row.id] ?? row.name, name: row.name, isDirectory: row.isDir,
-                  size: row.size, modified: Date(timeIntervalSince1970: row.modified))
-        }
-        return SearchResult(entries: entries, total: matched.count, elapsedMS: 0)
+        return matched
     }
 
     private func ftsQueryFor(_ request: SearchRequest) -> String? {
@@ -864,13 +888,25 @@ public final class Database: @unchecked Sendable {
         if !request.includeHidden {
             sql += " AND substr(name, 1, 1) != '.'"
         }
-        sql += " ORDER BY modified DESC, id DESC LIMIT \(max(1, min(request.limit, 100_000)))"
+        switch request.kind {
+        case .all: break
+        case .folders: sql += " AND is_dir = 1"
+        case .files: sql += " AND is_dir = 0"
+        }
+        let countSQL = sql.replacingOccurrences(of: "SELECT id, parent, name, is_dir, size, modified", with: "SELECT count(*)")
+        var countStatement: OpaquePointer?
+        guard sqlite3_prepare_v2(searchReader, countSQL, -1, &countStatement, nil) == SQLITE_OK,
+              let countStatement else { throw DatabaseError.sql(Self.errorMessage(searchReader), sql: countSQL) }
+        defer { sqlite3_finalize(countStatement) }
+        _ = try stepSearch(countStatement)
+        let total = Int(sqlite3_column_int64(countStatement, 0))
+        sql += " ORDER BY modified DESC, id DESC LIMIT \(max(1, min(request.limit, 100_000))) OFFSET \(max(0, request.offset))"
         let rows = try bareRows(sql)
         let paths = try materializePaths(ids: rows.map(\.id))
         let entries = rows.map { row in
             Entry(id: row.id, path: paths[row.id] ?? row.name, name: row.name, isDirectory: row.isDir, size: row.size, modified: Date(timeIntervalSince1970: row.modified))
         }
-        return SearchResult(entries: entries, total: try count(), elapsedMS: 0)
+        return SearchResult(entries: entries, total: total, elapsedMS: 0)
     }
 
     private func ftsSearch(_ request: SearchRequest, match: String) throws -> SearchResult {
@@ -885,8 +921,9 @@ public final class Database: @unchecked Sendable {
         case .files: sql += " AND entries.is_dir = 0"
         }
         sql += " ORDER BY \(Self.orderClause(for: request.sortKey, ascending: request.ascending))"
-        let fetchLimit = request.matchCase ? 100_000 : max(1, min(request.limit, 100_000))
-        sql += " LIMIT \(fetchLimit)"
+        if !request.matchCase {
+            sql += " LIMIT \(max(1, min(request.limit, 100_000))) OFFSET \(max(0, request.offset))"
+        }
 
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(searchReader, sql, -1, &statement, nil) == SQLITE_OK, let prepared = statement else {
@@ -922,8 +959,8 @@ public final class Database: @unchecked Sendable {
             }
         }
 
-        let total = request.matchCase ? rows.count : try count(match: match)
-        rows = Array(rows.prefix(max(1, min(request.limit, 100_000))))
+        let total = request.matchCase ? rows.count : try count(match: match, request: request)
+        rows = Array(rows.dropFirst(request.matchCase ? max(0, request.offset) : 0).prefix(max(1, min(request.limit, 100_000))))
         let paths = try materializePaths(ids: rows.map(\.id))
         let entries = rows.map { row in
             Entry(id: row.id, path: paths[row.id] ?? row.name, name: row.name, isDirectory: row.isDir, size: row.size, modified: Date(timeIntervalSince1970: row.modified))
@@ -948,7 +985,6 @@ public final class Database: @unchecked Sendable {
             case .files: sql += " AND is_dir = 0"
             }
             sql += " ORDER BY \(Self.orderClause(for: request.sortKey, ascending: request.ascending))"
-            sql += " LIMIT \(max(1, min(100_000, request.limit * 10)))"
 
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(searchReader, sql, -1, &statement, nil) == SQLITE_OK, let prepared = statement else {
@@ -978,11 +1014,12 @@ public final class Database: @unchecked Sendable {
             }
         }
 
-        let matched = try candidates.filter {
+        let filtered = try candidates.filter {
             try searchCancellation?.check()
             return regexBox.matches($0.name)
         }
-        let limited = matched.prefix(max(1, min(request.limit, 100_000)))
+        let matched = try sortedRows(filtered, request: request)
+        let limited = matched.dropFirst(max(0, request.offset)).prefix(max(1, min(request.limit, 100_000)))
         let paths = try materializePaths(ids: limited.map(\.id))
         let entries = limited.map { row in
             Entry(id: row.id, path: paths[row.id] ?? row.name, name: row.name, isDirectory: row.isDir, size: row.size, modified: Date(timeIntervalSince1970: row.modified))
@@ -1155,8 +1192,7 @@ public final class Database: @unchecked Sendable {
         let needsPaths = request.matchPath || parsed.groups.contains { $0.terms.contains { $0.hasPathSeparator } }
         let limit = max(1, min(request.limit, 100_000))
         var dirPaths: [Int64: String] = [:]
-        var results: [Entry] = []
-        var total = 0
+        var matches: [BareRow] = []
 
         func dirPath(for id: Int64) throws -> String {
             if id == 0 { return "" }
@@ -1177,20 +1213,20 @@ public final class Database: @unchecked Sendable {
             }
 
             let parentPath = needsPaths ? try dirPath(for: row.parent) : ""
-            var fullPath = parentPath.isEmpty ? "/" + row.name : parentPath + "/" + row.name
+            let fullPath = parentPath.isEmpty ? "/" + row.name : parentPath + "/" + row.name
 
-            let matches = useRegex ? regexBox.matches(fullPath) : rowMatches(name: row.name, fullPath: fullPath)
-            guard matches else { continue }
-            total += 1
-            if results.count < limit {
-                if !needsPaths {
-                    let parent = try dirPath(for: row.parent)
-                    fullPath = parent.isEmpty ? "/" + row.name : parent + "/" + row.name
-                }
-                results.append(Entry(id: row.id, path: fullPath, name: row.name, isDirectory: row.isDir, size: row.size, modified: Date(timeIntervalSince1970: row.modified)))
-            }
+            let matched = useRegex ? regexBox.matches(fullPath) : rowMatches(name: row.name, fullPath: fullPath)
+            guard matched else { continue }
+            matches.append(row)
         }
-        return SearchResult(entries: results, total: total, elapsedMS: 0)
+        let sorted = try sortedRows(matches, request: request)
+        let page = sorted.dropFirst(max(0, request.offset)).prefix(limit)
+        let paths = try materializePaths(ids: page.map(\.id))
+        let entries = page.map { row in
+            Entry(id: row.id, path: paths[row.id] ?? row.name, name: row.name, isDirectory: row.isDir,
+                  size: row.size, modified: Date(timeIntervalSince1970: row.modified))
+        }
+        return SearchResult(entries: entries, total: matches.count, elapsedMS: 0)
     }
 
     private func resolvePath(for id: Int64) throws -> String {
@@ -1268,8 +1304,14 @@ public final class Database: @unchecked Sendable {
         return (id, parent, name, isDir, size, Double(modified))
     }
 
-    private func count(match: String) throws -> Int {
-        let sql = "SELECT COUNT(entries.id) FROM entries JOIN entries_fts ON entries_fts.rowid = entries.id WHERE entries_fts MATCH ?1"
+    private func count(match: String, request: SearchRequest) throws -> Int {
+        var sql = "SELECT COUNT(entries.id) FROM entries JOIN entries_fts ON entries_fts.rowid = entries.id WHERE entries_fts MATCH ?1"
+        if !request.includeHidden { sql += " AND substr(entries.name, 1, 1) != '.'" }
+        switch request.kind {
+        case .all: break
+        case .folders: sql += " AND entries.is_dir = 1"
+        case .files: sql += " AND entries.is_dir = 0"
+        }
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(searchReader, sql, -1, &statement, nil) == SQLITE_OK, let prepared = statement else {
             throw DatabaseError.sql(Self.errorMessage(searchReader), sql: sql)

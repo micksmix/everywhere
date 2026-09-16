@@ -55,6 +55,10 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     private var searchTask: Task<Void, Never>?
     private var searchCancellation = SearchCancellation()
     private var searchGeneration: UInt64 = 0
+    private var warmTask: Task<Void, Never>?
+    private var warmCancellation = SearchCancellation()
+    private var resultSnapshot: Int64?
+    private var loadedGeneration: UInt64 = 0
     private var searchInFlight = false
     private var pendingIndexRefresh = false
     private var memorySubscription: AnyCancellable?
@@ -88,6 +92,8 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     deinit {
         searchTask?.cancel()
         searchCancellation.cancel()
+        warmTask?.cancel()
+        warmCancellation.cancel()
     }
 
     var sortDescriptors: [NSSortDescriptor] {
@@ -127,7 +133,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
             wholeWord: wholeWord,
             sortKey: sortKey,
             ascending: sortAscending,
-            limit: 10_000
+            limit: 200
         )
     }
 
@@ -141,10 +147,36 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
 
     private func finishSearch() {
         searchInFlight = false
-        if pendingIndexRefresh { scheduleSearch() }
+        if pendingIndexRefresh {
+            scheduleSearch()
+        } else {
+            prepareMemorySearch()
+        }
     }
 
-    private func scheduleSearch() {
+    func loadMoreResults(after row: Int) {
+        guard !searchInFlight, loadedGeneration == searchGeneration,
+              row >= results.count - 40, results.count < totalMatches else { return }
+        scheduleSearch(offset: results.count)
+    }
+
+    private func prepareMemorySearch() {
+        guard AppPreferences.shared.keepSearchIndexInMemory, indexService.phase == .idle else { return }
+        warmTask?.cancel()
+        warmCancellation.cancel()
+        let cancellation = SearchCancellation()
+        warmCancellation = cancellation
+        let db = database
+        let key = sortKey
+        let ascending = sortAscending
+        warmTask = Task.detached(priority: .utility) {
+            try? db.prepareSearchIndex(sortKey: key, ascending: ascending, cancellation: cancellation)
+        }
+    }
+
+    private func scheduleSearch(offset: Int = 0) {
+        warmTask?.cancel()
+        warmCancellation.cancel()
         searchInFlight = true
         pendingIndexRefresh = false
         searchTask?.cancel()
@@ -154,17 +186,24 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         searchGeneration &+= 1
         let generation = searchGeneration
         let useMemory = AppPreferences.shared.keepSearchIndexInMemory
-        let request = currentRequest()
+        var request = currentRequest()
+        request.offset = offset
+        let started = CFAbsoluteTimeGetCurrent()
         let db = database
         searchTask = Task.detached(priority: .userInitiated) { [weak self] in
-            try? await Task.sleep(nanoseconds: 90_000_000)
             guard !Task.isCancelled else { return }
             do {
                 let result = try db.search(request, useMemory: useMemory, cancellation: cancellation)
                 guard !Task.isCancelled else { return }
                 DispatchQueue.main.async {
                     guard let self, generation == self.searchGeneration else { return }
-                    self.apply(result)
+                    if offset > 0 && self.resultSnapshot != result.snapshotVersion {
+                        self.scheduleSearch()
+                        return
+                    }
+                    self.apply(result, append: offset > 0)
+                    self.loadedGeneration = generation
+                    self.elapsedMS = (CFAbsoluteTimeGetCurrent() - started) * 1000
                     self.finishSearch()
                 }
             } catch {
@@ -184,9 +223,14 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         (error as? DatabaseError)?.errorDescription ?? String(describing: error)
     }
 
-    private func apply(_ result: SearchResult) {
-        selection.formIntersection(Set(result.entries.map(\.id)))
-        results = result.entries
+    private func apply(_ result: SearchResult, append: Bool) {
+        if append {
+            results.append(contentsOf: result.entries)
+        } else {
+            selection.formIntersection(Set(result.entries.map(\.id)))
+            results = result.entries
+        }
+        resultSnapshot = result.snapshotVersion
         totalMatches = result.total
         elapsedMS = result.elapsedMS
         cacheStatistics = result.cacheStatistics
@@ -214,6 +258,19 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         let urls = selectedEntries.map { URL(fileURLWithPath: $0.path) }
         guard !urls.isEmpty else { return }
         NSWorkspace.shared.activateFileViewerSelecting(urls)
+    }
+
+    func showInfo(_ entries: [Entry]) {
+        let urls = entries.prefix(10).map { URL(fileURLWithPath: $0.path) as NSURL }
+        guard !urls.isEmpty else { return }
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        if !pasteboard.writeObjects(urls) || !NSPerformService("Finder/Show Info", pasteboard) {
+            let alert = NSAlert()
+            alert.messageText = "Could not open Get Info"
+            alert.informativeText = "The item may no longer exist, or Finder’s Get Info service may be unavailable."
+            alert.runModal()
+        }
     }
 
     func openInTerminal(_ entries: [Entry]) {

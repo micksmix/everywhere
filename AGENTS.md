@@ -97,7 +97,9 @@ and re-measure both size and speed.
      → substring matching, including punctuation and mid-token fragments. Optional packed
      memory cache accelerates these; disk mode streams rows with identical matching rules.
    - simple whole-word queries → FTS fast path (`ftsQueryFor`)
-   - everything else (`|`, `!`, `*`/`?`, `/`-terms, Match Path) → `scanSearch`
+   - filename-only boolean/wildcard queries (`|`, `!`, `*`/`?`) → `nameSearch`, using
+     the packed memory cache or an equivalent disk scan with a compiled `NameQuery`
+   - remaining whole-word queries, `/`-terms, Match Path → `scanSearch`
 7. **Memory cache stores names and metadata, never full paths.** Validate it using the search
    connection's `PRAGMA data_version` inside the read transaction. Small local writes use
    a bounded, writer-lock-protected change journal; update hooks only record `entries` IDs.
@@ -107,13 +109,19 @@ and re-measure both size and speed.
    needed. Cancelled partial patches must discard the cache. Release it in disk mode.
    Keep at most three lazy sort orders and merge changed rows into existing orders.
    Memory statistics estimate allocated array storage, not whole-process memory. ASCII searches compare packed bytes, Unicode
-   searches retain Swift lowercase semantics. Resolve paths only for returned rows when
+   searches retain Swift lowercase semantics. One completed candidate list can be reused
+   for identical or provably narrower literal queries with unchanged filters. Invalidate
+   it on cache patches/reloads; never publish partial cancelled candidates. Background
+   cache/sort preparation uses the same serialized search connection and cancellation.
+   Resolve paths only for returned rows when
    matching names. Keep disk and memory matching, counts, filtering, and sorting equivalent.
 8. **Reads and writes use separate connections** (writer lock = `NSRecursiveLock`, reader
    for searches). WAL mode keeps readers unblocked during bulk inserts. Don't merge them.
    Searches use their own serialized connection and read transaction, separate from indexing
    reads. Cancellation interrupts SQL with a progress handler and checks Swift loops. Never
    publish cancelled or older-generation results, including when the query text repeats.
+   Page with offsets and exact filtered totals. Only append pages with the same search
+   connection data-version token; restart at page zero when the index changed.
 
 ## Indexing and journal lifecycle
 

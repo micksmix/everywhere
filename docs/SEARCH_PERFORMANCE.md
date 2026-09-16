@@ -107,3 +107,73 @@ The change journal and sort orders are in memory only: the SQLite schema remains
 version 3 with no additional persistent table or index. The synthetic file measured
 138,174,464 bytes; this fixture's metadata distribution differs from the earlier size
 comparison, so those file sizes should not be compared as a format change.
+
+## Immediate search and paging (September 15, 2026)
+
+The UI no longer waits 90 ms before starting a search. It requests 200 rows, appends
+pages near the end of the loaded rows, and rejects pages from a different database
+snapshot. Counts include only matching, visible results; the empty root is excluded.
+The UI timer now includes scheduling and publication, but excludes table drawing.
+
+A disposable release XCTest fixture created 100,000 files named `report-<number>.txt`
+under `/projects/group-<number modulo 100>/`. The following single-run comparisons
+include matching, exact counting, sorting, and path reconstruction. The old and new
+10,000-row columns use the same query sequence. The new first-page column runs after
+warming the cache and name sort. These are synthetic results, not measurements of
+physical keystroke-to-screen latency or a benchmark against Everything itself.
+
+| Query | Before, up to 10,000 rows | After, up to 10,000 rows | After, 200-row first page |
+| --- | ---: | ---: | ---: |
+| `re` | 39.6 ms, cold | 41.2 ms, cold | 2.12 ms |
+| `rep` | 18.5 ms | 19.6 ms | 1.55 ms |
+| `report-9` | 19.6 ms | 19.6 ms | 2.27 ms |
+| `report-99` | 3.52 ms | 2.18 ms | 0.58 ms |
+| `*.txt` | 209.7 ms | 22.25 ms | 4.12 ms |
+| `report-99 \| group` | 210.4 ms | 5.77 ms | 3.71 ms |
+
+With one million files in the same layout, warm first pages took 17.1 ms for `re`,
+12.1 ms for the narrowing query `rep`, 2.54 ms for `report-99`, 36.5 ms for `*.txt`,
+and 35.5 ms for the OR query. Preparing a fresh memory cache and name sort took
+202.6 ms; the subsequent `re` page took 17.5 ms and its second page took 0.40 ms.
+Cold starts and broad scans still cost time; background preparation moves the initial
+load off the typing path when it completes before typing begins.
+
+At 100,000 files, the estimated allocated arrays grew from 8.32 MB to 9.90 MB for a
+broad query. The difference is the retained completed candidate list, which avoids
+rescanning or sorting for subsequent pages. At one million files, total estimated
+cache arrays were 109.1 MB with a broad candidate list and one sort order. These are
+capacity-based estimates, not process resident memory. Only one candidate list is
+retained, and at most three sort orders; disk mode releases them. No schema, persistent
+index, full-path storage, or file-indexing algorithm changed.
+
+### What was adopted from Everything
+
+Everything documents an in-memory database and persistent fast-sort indexes
+([Indexes](https://www.voidtools.com/support/everything/indexes/)). Its developer
+attributes the performance of versions 1.4/1.5, written in C, to tight loops and
+keeping hot data in CPU cache
+([developer's explanation](https://www.voidtools.com/forum/viewtopic.php?t=9863)).
+It also documents evaluating faster search conditions before slower ones
+([Search functions](https://www.voidtools.com/support/everything/search_functions/)).
+
+Everywhere now applies those principles with packed UTF-8 filename matching,
+background sort preparation, compiled boolean/wildcard queries, and cheap literal
+conditions before regex conditions. ASCII wildcards use a byte matcher; Unicode and
+line-break cases preserve Foundation regex behavior. Literal queries that provably
+narrow the previous query filter its completed candidate list, preserving its sort
+order. Paging identical queries reuses that list directly. Index changes invalidate
+it. These are adaptations of documented principles, not a claim to reproduce
+Everything's undisclosed internal query engine. No speculative SIMD or parallel
+scan implementation was added without evidence that it would improve this workload.
+
+Regex, whole-word, and path searches remain SQLite-backed. Regex candidates are now
+filtered before paging rather than truncated early. Their latency can still be
+higher, and exact counting still requires examining all relevant candidates.
+
+A disposable native AppKit/SwiftUI harness verified first-page loading, scroll-driven
+page append, repeated query replacement, snapshot-change restart, and clearing. Its
+650-file query published in 0.77 ms. This was programmatic native-control testing,
+not a physical keyboard/mouse interaction test. Permanent tests cover paging across
+engines and sort directions, filtered totals, narrowing/refinement, cache invalidation,
+Unicode/boolean parity, and byte-glob equivalence to ICU for ASCII control characters.
+The long-running benchmark and UI harness were not added to the repository.

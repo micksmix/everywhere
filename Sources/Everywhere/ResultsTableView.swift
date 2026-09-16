@@ -85,6 +85,12 @@ struct ResultsTableView: NSViewRepresentable {
             self.viewModel = viewModel
         }
 
+        func tableView(_ tableView: NSTableView, didAdd rowView: NSTableRowView, forRow row: Int) {
+            DispatchQueue.main.async { [weak self] in
+                self?.viewModel.loadMoreResults(after: row)
+            }
+        }
+
         func numberOfRows(in tableView: NSTableView) -> Int {
             viewModel.results.count
         }
@@ -227,6 +233,10 @@ struct ResultsTableView: NSViewRepresentable {
             reveal.target = self
             menu.addItem(reveal)
 
+            let info = NSMenuItem(title: "Get Info", action: #selector(showInfoFromMenu(_:)), keyEquivalent: "")
+            info.target = self
+            menu.addItem(info)
+
             menu.addItem(.separator())
 
             let copyName = NSMenuItem(title: "Copy Name", action: #selector(copyNameFromMenu(_:)), keyEquivalent: "")
@@ -293,6 +303,10 @@ struct ResultsTableView: NSViewRepresentable {
             let urls = targetEntries().map { URL(fileURLWithPath: $0.path) }
             guard !urls.isEmpty else { return }
             NSWorkspace.shared.activateFileViewerSelecting(urls)
+        }
+
+        @objc private func showInfoFromMenu(_ sender: Any?) {
+            viewModel.showInfo(targetEntries())
         }
 
         @objc private func openInTerminalFromMenu(_ sender: Any?) {

@@ -70,6 +70,7 @@ final class StatusItemController {
     }
 
     @objc private func settingsClicked() {
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         if let onSettings {
             onSettings()
