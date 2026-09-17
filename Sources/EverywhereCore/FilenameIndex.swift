@@ -102,11 +102,11 @@ final class FilenameIndex {
         sortOrders[ordering] = sorted
     }
 
-    func select(request: SearchRequest, cancellation: SearchCancellation?) throws -> (rows: [(Row, String)], total: Int) {
-        let query = NameQuery(request)
+    func select(request: SearchRequest, cancellation: SearchCancellation?, filteredGroup: FilterQuery.Group? = nil) throws -> (rows: [(Row, String)], total: Int) {
+        let query = NameQuery(request, parsed: filteredGroup.map { ParsedQuery(groups: [ParsedGroup(terms: $0.terms)]) })
         var reuse = false
         var identical = false
-        if let previous = previousRequest,
+        if filteredGroup == nil, let previous = previousRequest,
            previous.kind == request.kind, previous.includeHidden == request.includeHidden,
            previous.matchCase == request.matchCase, previous.wholeWord == request.wholeWord {
             identical = previous.text == request.text
@@ -141,6 +141,18 @@ final class FilenameIndex {
                 }
             }
         }
+        if let group = filteredGroup {
+            var filtered: [UInt32] = []
+            for (offset, index) in matches.enumerated() {
+                if offset % 256 == 0 { try cancellation?.check() }
+                let row = rows[index]
+                let name = name(for: row)
+                if group.filters.allSatisfy({ $0.matches(name: name, isDirectory: row.isDirectory, size: row.size, modified: row.modified) }) {
+                    filtered.append(index)
+                }
+            }
+            matches = filtered
+        }
         let ordering = Ordering(key: request.sortKey, ascending: request.ascending)
         let alreadySorted = reuse && previousRequest?.sortKey == request.sortKey && previousRequest?.ascending == request.ascending
         if !alreadySorted {
@@ -165,8 +177,8 @@ final class FilenameIndex {
             }
         }
         try cancellation?.check()
-        previousRequest = request
-        previousTerms = query.literalTerms
+        previousRequest = filteredGroup == nil ? request : nil
+        previousTerms = filteredGroup == nil ? query.literalTerms : nil
         previousMatches = matches
         let page = matches.dropFirst(max(0, request.offset)).prefix(max(1, min(request.limit, 100_000)))
         return (page.map { (rows[$0], name(for: rows[$0])) }, matches.count)

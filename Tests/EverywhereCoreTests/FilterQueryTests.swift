@@ -42,6 +42,51 @@ final class FilterQueryTests: XCTestCase {
         }
     }
 
+    func testFilteredMemorySearchMatchesDiskAcrossQueriesPagesAndUpdates() throws {
+        try fixture { db, tree in
+            for folder in 0..<8 {
+                try tree.add(path: "/set-\(folder)/Vacation.HEIC", size: Int64(folder * 100), modified: Double(folder))
+                try tree.add(path: "/set-\(folder)/vacation.svg", size: 5)
+                try tree.add(path: "/set-\(folder)/vacation.txt", size: 7)
+                try tree.add(path: "/set-\(folder)/.vacation.png", size: 9)
+                try tree.add(path: "/set-\(folder)/vacation.jpg", isDir: true)
+            }
+            try tree.add(path: "/special/Kelvin.heic")
+            try tree.add(path: "/special/O'Brien.heic")
+            let queries = ["type:image vacation", "vacation", "type:image vac", "type:image vacation size:>200",
+                           "type:image vacation !ext:svg", "!type:image vacation", "type:image *.HEIC",
+                           "type:image !vacation", "type:image", "type:image k", "type:image O'Brien",
+                           "type:image vacation | ext:txt", "type:image \"Vacation.HEIC\""]
+            var requests: [SearchRequest] = []
+            for query in queries {
+                for sort in [SortKey.name, .size, .modified, .kind, .path] {
+                    requests.append(SearchRequest(text: query, sortKey: sort, ascending: false, limit: 3, offset: 1))
+                }
+            }
+            requests.append(SearchRequest(text: "type:image vacation", includeHidden: false, matchCase: true))
+            requests.append(SearchRequest(text: "type:image vacation", wholeWord: true))
+            func check() throws {
+                let expected = try requests.map { try db.search($0) }
+                for (request, result) in zip(requests, expected) {
+                    let actual = try db.search(request, useMemory: true)
+                    XCTAssertEqual(actual.entries, result.entries, request.text)
+                    XCTAssertEqual(actual.total, result.total, request.text)
+                }
+            }
+            try check()
+            let result = try db.search(SearchRequest(text: "type:image vacation"), useMemory: true)
+            XCTAssertEqual(result.total, 24)
+            XCTAssertGreaterThan(result.cacheStatistics.itemCount, 0)
+            try db.deleteIDs([tree.id(for: "/set-0/Vacation.HEIC")!])
+            try tree.add(path: "/new/vacation.avif")
+            let updated = try db.search(SearchRequest(text: "type:image vacation"), useMemory: true)
+            XCTAssertEqual(updated.total, 24)
+            XCTAssertTrue(updated.entries.contains { $0.path == "/new/vacation.avif" })
+            XCTAssertGreaterThan(updated.cacheStatistics.incrementalRefreshes, 0)
+            try check()
+        }
+    }
+
     func testScopeHandlesIndependentRootsUnicodeAndQuotes() throws {
         try fixture { db, tree in
             let root = try db.ensureRootRow(path: "/Separate Root/Ärea")

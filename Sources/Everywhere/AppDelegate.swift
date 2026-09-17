@@ -29,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(.regular)
         NotificationCenter.default.addObserver(self, selector: #selector(windowBecameKey(_:)),
                                                name: NSWindow.didBecomeKeyNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(windowWillClose(_:)),
@@ -44,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let window = notification.object as? NSWindow,
               window.canBecomeMain, window.isVisible, NSApp.windows.contains(window) else { return }
         closingWindows.remove(window)
-        if NSApp.activationPolicy() != .regular { activateWindowMode() }
+        if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
     }
 
     @objc private func windowWillClose(_ notification: Notification) {
@@ -91,6 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func registerMainWindow(_ window: NSWindow) {
+        window.level = .normal
         window.identifier = NSUserInterfaceItemIdentifier("EverywhereMainWindow")
         if !window.titlebarAccessoryViewControllers.contains(where: { $0.identifier?.rawValue == "ApplicationIcon" }) {
             let accessory = NSTitlebarAccessoryViewController()
@@ -104,7 +105,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.addTitlebarAccessoryViewController(accessory)
         }
         mainWindow = window
-        if window.isVisible { activateWindowMode() }
+        if window.isVisible && NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
     }
 
     func showMainWindow() {

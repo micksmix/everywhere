@@ -679,7 +679,7 @@ public final class Database: @unchecked Sendable {
         } else if useRegex {
             result = try regexSearch(request)
         } else if FilterQuery.containsFilters(request.text) {
-            result = try filteredSearch(request)
+            result = try filteredSearch(request, useMemory: useMemory)
         } else if isNameQuery(request), !request.wholeWord {
             result = try nameSearch(request, useMemory: useMemory)
         } else if let match = ftsQueryFor(request) {
@@ -804,8 +804,21 @@ public final class Database: @unchecked Sendable {
         }
     }
 
-    private func filteredSearch(_ request: SearchRequest) throws -> SearchResult {
+    private func filteredSearch(_ request: SearchRequest, useMemory: Bool) throws -> SearchResult {
         let query = try FilterQuery(request.text)
+        if useMemory, !request.matchPath, query.groups.count == 1, let group = query.groups.first,
+           !group.terms.contains(where: { $0.hasPathSeparator }),
+           !group.filters.contains(where: { if case .scope = $0.predicate { return true }; return false }) {
+            try refreshMemoryIndex()
+            guard let memoryRows else { return SearchResult(entries: [], total: 0, elapsedMS: 0) }
+            let selected = try memoryRows.select(request: request, cancellation: searchCancellation, filteredGroup: group)
+            let paths = try materializePaths(ids: selected.rows.map { $0.0.id })
+            let entries = selected.rows.map { row, name in
+                Entry(id: row.id, path: paths[row.id] ?? name, name: name, isDirectory: row.isDirectory,
+                      size: row.size, modified: Date(timeIntervalSince1970: row.modified))
+            }
+            return SearchResult(entries: entries, total: selected.total, elapsedMS: 0)
+        }
         var scopes: [String] = []
         var conditions: [String] = []
         for group in query.groups {
@@ -827,6 +840,12 @@ public final class Database: @unchecked Sendable {
                 case .extensions: continue
                 }
                 predicates.append(filter.negated ? "NOT (\(predicate))" : "(\(predicate))")
+            }
+            if !request.matchPath {
+                for term in group.terms where !term.isNegated && !term.hasWildcards && !term.hasPathSeparator && term.text.utf8.allSatisfy({ $0 > 0 && $0 < 128 }) {
+                    let literal = term.text.lowercased().replacingOccurrences(of: "'", with: "''")
+                    predicates.append("(instr(lower(name), '\(literal)') > 0 OR name GLOB '*[^ -~]*')")
+                }
             }
             conditions.append(predicates.isEmpty ? "1" : predicates.joined(separator: " AND "))
         }

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f8fc">
+  <meta name="description" content="Everywhere is a free, open-source file search app for macOS. Find files as you type, filter precisely, and get back to work.">
+  <title>Everywhere — Your files. Right here.</title>
+  <link rel="icon" type="image/svg+xml" href="assets/icon.svg">
+  <link rel="stylesheet" href="style.css">
+  <script src="script.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="wrap nav">
+  <a class="brand" href="./"><img src="assets/icon.svg" width="36" height="36" alt="">Everywhere</a>
+  <nav aria-label="Main navigation"><a href="#features">Features</a><a href="https://github.com/micksmix/everywhere/blob/main/docs/USER_GUIDE.md">Guide</a><a href="https://github.com/micksmix/everywhere">GitHub <span aria-hidden="true">↗</span></a></nav>
+</header>
+<main id="main">
+  <section class="hero wrap">
+    <p class="eyebrow">FILE SEARCH, MADE FOR MAC</p>
+    <h1>Your files.<br><span>Right here.</span></h1>
+    <p class="intro">You remember the name. Everywhere finds the file.<br class="desktop"> Fast, focused search that feels at home on your Mac.</p>
+    <div class="actions"><a class="button primary" href="https://github.com/micksmix/everywhere/releases/latest">Download for macOS <span aria-hidden="true">↓</span></a><a class="button secondary" href="#install">Install with Homebrew</a></div>
+    <p class="compatibility">macOS 13+ <span>·</span> Apple silicon &amp; Intel <span>·</span> Free &amp; open source</p>
+    <figure class="hero-shot"><a href="assets/search.png" aria-label="View full-size Everywhere search screenshot"><img src="assets/search.png" width="1137" height="646" alt="Everywhere finding Swift source files, with filename, path, size, kind, and modification date columns." fetchpriority="high"></a><figcaption>Real files. A native Mac app. Everything you need to find your way.</figcaption></figure>
+  </section>
+  <section class="wrap features" id="features" aria-labelledby="features-title">
+    <div class="section-head"><p class="eyebrow">LESS HUNTING. MORE DOING.</p><h2 id="features-title">A small app.<br>A very useful superpower.</h2></div>
+    <div class="feature-grid">
+      <article><span class="feature-symbol" aria-hidden="true">⌕</span><h3>Start typing. Find it.</h3><p>Search fragments anywhere in a filename. Results update as you type, with matching text highlighted and more results as you scroll.</p></article>
+      <article><span class="feature-symbol" aria-hidden="true">⌥</span><h3>Always within reach.</h3><p>Press <kbd>⌥</kbd> <kbd>Space</kbd> to bring Everywhere forward. It stays in your menu bar, ready for the next “where did I put that?”</p></article>
+      <article><span class="feature-symbol" aria-hidden="true">↵</span><h3>Find it. Then use it.</h3><p>Open files, reveal them in Finder, preview with Quick Look, or open a folder in your favorite terminal. All from the results.</p></article>
+    </div>
+  </section>
+  <section class="query-section" aria-labelledby="query-title"><div class="wrap query-layout">
+    <div><p class="eyebrow">FROM A FRAGMENT TO A FILTER</p><h2 id="query-title">Know a little?<br>Find a lot.</h2><p class="section-copy">A few letters are often enough. When you need to be specific, combine names with file types, sizes, dates, and folders.</p><a class="text-link" href="https://github.com/micksmix/everywhere/blob/main/docs/USER_GUIDE.md#filter-by-type-size-date-or-folder">Explore the search syntax <span aria-hidden="true">↗</span></a></div>
+    <div class="queries"><div><code>report ext:pdf</code><p>The report, in PDF form.</p></div><div><code>type:image dm:pastweek</code><p>Images modified in the past week.</p></div><div><code>size:&gt;100MB</code><p>The big files taking up space.</p></div><div><code>in:~/Documents invoice</code><p>Invoices inside Documents and its subfolders.</p></div></div>
+  </div></section>
+  <section class="wrap detail" aria-labelledby="detail-title"><div class="section-head"><p class="eyebrow">FAMILIAR BY DESIGN</p><h2 id="detail-title">Mac through and through.</h2><p class="section-copy">Native controls. Keyboard shortcuts. Help that works offline. <br>Built with SwiftUI and AppKit to fit the way you work.</p></div><figure class="detail-shot"><a href="assets/filtered-search.png" aria-label="View full-size filtered search screenshot"><img src="assets/filtered-search.png" width="1137" height="646" alt="Everywhere narrowing source files to five matching Search filenames within the project folder." loading="lazy"></a></figure>
+    <div class="details-grid"><article><h3>Your index. Your choice.</h3><p>Choose your search locations and exclusions. Pause a scan, resume it, or search your saved index while updates are off.</p></article><article><h3>Keeps up with your files.</h3><p>Live filesystem updates track changes. Journal replay catches up with changes made while Everywhere was closed.</p></article><article><h3>Focused on filenames.</h3><p>Everywhere indexes names and filesystem metadata, not document contents. A compact SQLite index powers the search.</p></article></div>
+  </section>
+  <section class="install wrap" id="install" aria-labelledby="install-title"><div><p class="eyebrow">MAKE YOURSELF AT HOME</p><h2 id="install-title">Find your next file<br>with Everywhere.</h2><p class="section-copy">Free to use. Open to explore. <br>Available for macOS Ventura and later.</p><a class="button primary" href="https://github.com/micksmix/everywhere/releases/latest">Get the latest release <span aria-hidden="true">↗</span></a></div><div class="install-panel"><div class="code-heading"><h3>Install with Homebrew</h3><button id="copy-install" type="button">Copy</button></div><pre><code id="install-command">brew tap micksmix/tap
+brew trust micksmix/tap
+brew install --cask micksmix/tap/everywhere</code></pre><p id="copy-status" role="status" aria-live="polite"></p><p class="install-note">The app is signed ad hoc and is not notarized. On first launch, macOS may ask you to allow it in <strong>System Settings → Privacy &amp; Security → Open Anyway</strong>.</p><a class="text-link" href="https://github.com/micksmix/everywhere#first-use">First-use setup &amp; file access <span aria-hidden="true">↗</span></a></div></section>
+</main>
+<footer class="wrap"><a class="brand" href="./"><img src="assets/icon.svg" width="28" height="28" alt="">Everywhere</a><p>Built for the files you already have.</p><div><a href="https://github.com/micksmix/everywhere">Source</a><a href="https://github.com/micksmix/everywhere/issues">Issues</a><a href="https://github.com/micksmix/everywhere/blob/main/LICENSE">Apache 2.0</a></div></footer>
+</body>
+</html>

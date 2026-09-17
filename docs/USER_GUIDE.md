@@ -57,7 +57,7 @@ and allow Everywhere in macOS System Settings. Turn the toggle off to stop launc
 at login. The toggle refreshes when you return from System Settings. This option is
 unavailable when running the unbundled executable with `make run`.
 
-Open **Everywhere → Settings… → General** to toggle **Enable global shortcut** or change
+Open **Everywhere → Settings… → Shortcuts** to toggle **Enable global shortcut** or change
 the shortcut. Choose Space, a letter, or a digit and select modifiers (at least Control,
 Option, or Command). Changes apply immediately and are saved across launches.
 Use **Reset to ⌥ Space** to restore the default. Keys refer to their US keyboard positions.
@@ -227,7 +227,7 @@ individual rows or **Shift-click** for a range.
 | Copy the full path | Right-click → **Copy Path** |
 | Copy just the filename | Right-click → **Copy Name** |
 
-Open in Terminal uses Terminal.app by default. In **Settings → General → Terminal**,
+Open in Terminal uses Terminal.app by default. In **Settings → Terminal**,
 click **Choose Application…** to select another terminal. The choice is saved and applies
 immediately. **Use Default** restores Terminal.app. The selected application must support
 opening folder URLs. Launch errors are shown in an alert.
@@ -242,7 +242,7 @@ selected. It is also available in the **Search** menu and leaves your clipboard 
 ## Choose indexed folders
 
 1. Open **Everywhere → Settings…** with **⌘,**.
-2. In the **Locations** tab, under **Index Locations**, click **Browse…**, choose folders, and confirm.
+2. Select **Index Locations** in the Settings sidebar, then click **Browse…**, choose folders, and confirm.
    Alternatively, enter a path in **Add a folder to index…** and click **Add**.
    `~` expands to your home directory when using the text field.
 3. Remove unwanted locations with the minus button.
@@ -260,10 +260,10 @@ indexing. If access is denied, a separate **Allow Full Disk Access** dialog appe
 location setup. A populated index skips this check. The dialog offers **Check Again** and
 **Continue with Limited Access**; continuing dismisses it for this launch only.
 
-Use **Open Full Disk Access Settings** in this dialog or in **Settings → Locations** to open
+Use **Open Full Disk Access Settings** in this dialog or in **Settings → File Access** to open
 **System Settings → Privacy & Security → Full Disk Access**. Enable Everywhere; if it is
 missing, click **+** and add Everywhere from Applications. Quit and reopen the app afterward.
-If you already scanned, choose **Reindex Accessible Files** in **Settings → Locations**
+If you already scanned, choose **Reindex Accessible Files** in **Settings → File Access**
 when the current operation finishes. Without access, you can still search accessible files,
 but protected files may be missing and macOS may ask for folder access. Access remains
 subject to macOS permissions, mounted volumes, and index exclusions.
@@ -271,11 +271,11 @@ subject to macOS permissions, mounted volumes, and index exclusions.
 macOS has no public Full Disk Access status API. Everywhere uses a read-only access probe
 without reading file contents. Missing probe files and ordinary filesystem permission
 errors are inconclusive and do not trigger the launch dialog. You can always open the
-access settings manually from **Settings → Locations**.
+access settings manually from **Settings → File Access**.
 
 ## Exclude names
 
-1. Open **Settings… → Locations → Exclusions**.
+1. Open **Settings… → Custom Exclusions → Names Containing**.
 2. Enter text such as `node_modules` or `cache` and click **Add**.
 3. Rebuild the index to apply the change to the existing results.
 
@@ -363,6 +363,12 @@ Hidden results depend on the item's dot-prefixed name. File contents are not sea
 Some system locations are skipped by default. The status count is not proof that every
 protected or excluded item was indexed.
 
+Paths under `/System/Volumes` are excluded by default, including the Preboot volume.
+To include them, remove `/System/Volumes` in **Settings → Built-in Exclusions**,
+then choose **Search → Rebuild Index**. You can also add a specific folder there as an
+explicit index location to override that built-in path exclusion. Different index
+locations and exclusions can produce different result counts in other search apps.
+
 ### The global shortcut does nothing
 
 1. Confirm Everywhere is running; look for its menu-bar icon.
@@ -415,7 +421,7 @@ or mount the volume. Rebuild if needed.
 
 ### Index storage location
 
-In **Settings → Locations → Index Storage**, use **Choose Existing…** to select a saved
+In **Settings → Index Storage**, use **Choose Existing…** to select a saved
 Everywhere index, or **New File…** to choose where to build a new one. You can also enter
 an absolute file path and click **Apply**. Quit and reopen Everywhere to use the selected
 file. This does not move or copy the current index. **Use Default** restores
@@ -438,7 +444,7 @@ entries, indexing starts immediately when enabled. You can also choose another e
 
 ### Database compaction
 
-To reclaim unused space immediately, open **Settings → Locations → Index Storage** and
+To reclaim unused space immediately, open **Settings → Index Storage** and
 click **Compact Index Now**. This compacts the active index without rebuilding it and
 shows a completion message. It works during the startup countdown or with indexing
 disabled; wait for any running or paused scan to finish first. Manual compaction skips
@@ -468,7 +474,7 @@ indexing or live updates are disabled, saved results can remain stale. Rebuild t
 if needed. Removing entries frees space for reuse inside the database; compaction
 reclaims disk space separately, as described above.
 
-Terminal quick-select buttons in **Settings → General → Terminal** find **Ghostty**,
+Terminal quick-select buttons in **Settings → Terminal** find **Ghostty**,
 **iTerm2**, **Warp**, **kitty**, or Apple **Terminal**. They check system and user
 Applications folders, Utilities folders, common Homebrew locations, and macOS’s
 registered applications. A match saves and displays the application path immediately.
@@ -477,14 +483,15 @@ You can still use **Choose Application…** to browse manually.
 
 ### Search memory and database format
 
-**Settings → General → Search Performance → Keep filename index in memory** is on
+**Settings → Search Performance → Keep filename index in memory** is on
 by default. It speeds up plain filename, wildcard, OR, and negated searches by caching
 packed names and metadata. The cache and selected sort order prepare in the background
 while indexing is idle. Typing cancels background preparation when needed. Small file
 changes apply incrementally; large changes, external database edits, or busy indexing
 may reload the cache. Full paths are reconstructed only for each requested page.
-Metadata filters, folder scopes, regex, whole-word, and other path searches use
-SQLite-backed engines. Folder scopes narrow the indexed tree before filename matching.
+Filename queries with metadata filters, such as `type:image vacation`, also use the
+cache when they contain no OR groups or folder/path conditions. Other filtered
+queries, folder scopes, regex, and path searches use SQLite-backed engines. Folder scopes narrow the indexed tree before filename matching.
 
 Turn the option off to release the cache and query SQLite directly. This uses less
 active memory, but filename searches can be slower. The operating system and SQLite
@@ -509,7 +516,7 @@ column/direction combinations are kept; less-used orders are released. Selective
 queries sort just their matches. The first broad query in a new sort order can take
 longer while that order is prepared. Small file changes update existing sort orders.
 
-**Settings → General → Search Performance** shows indexed cache items, filename-cache
+**Settings → Search Performance** shows indexed cache items, filename-cache
 storage, and fast-sort storage. These figures estimate allocated arrays, excluding
 other app memory and temporary work. Identical UTF-8 names share storage; candidate
 and sort arrays use four-byte positions. Character masks skip impossible ASCII matches
@@ -518,7 +525,18 @@ and its sort orders through the next scheduled search.
 
 ### Exclude specific folders and name patterns
 
-In **Settings → Locations → Excluded Folders**, click **Exclude Folder…** to choose one
+In **Settings → Built-in Exclusions**, review the default excluded paths
+and names. Use a rule's minus button to remove it. Name rules apply to files and folders
+anywhere, while path rules apply to the listed location and its descendants. Overlapping
+rules still apply: removing a path rule does not remove a matching name rule.
+
+Removed rules stay removed after restarting. **Restore Built-in Exclusions** restores
+all default rules without changing custom exclusions. Rebuild the index after changes
+to apply them to scans and live updates. The **Index Storage** section shows the one
+locked exclusion: Everywhere's database folder, which prevents a loop of indexing its
+own writes.
+
+In **Settings → Custom Exclusions → Excluded Folders**, click **Exclude Folder…** to choose one
 or more folders. Each selected folder and its contents are excluded; a different folder
 with the same name is unaffected. Remove an entry with its minus button.
 
@@ -526,7 +544,7 @@ In **Excluded Name Patterns**, enter patterns separated by semicolons, then clic
 
 - `*.tmp; *.log` excludes names ending in `.tmp` or `.log`.
 - `cache-?` excludes names such as `cache-a`, but not `cache-archive`.
-- `scratch` excludes that exact name. Use the existing **Exclusions** section to exclude
+- `scratch` excludes that exact name. Use the **Names Containing** section to exclude
   any name containing a word instead.
 
 Patterns ignore case and match whole names. `*` matches any text and `?` one character;
@@ -538,6 +556,13 @@ to the initial scan and live updates. The app's index-storage folder is always e
 Live folder updates reuse the existing indexed folder tree.
 
 
+## Settings navigation
+
+Settings uses a category sidebar on the left and the selected controls on the right.
+Choose General, Shortcuts, Terminal, or Updates for app preferences. Search Performance,
+Indexing, Index Locations, Custom Exclusions, Built-in Exclusions, Index Storage, and
+File Access each have a separate pane. Resize the window or scroll within a pane as needed.
+
 ## Updating Everywhere
 
 Everywhere checks for new stable GitHub releases at startup and once a day while
@@ -546,7 +571,7 @@ and Relaunch** when prompted. Everywhere downloads and verifies the release,
 replaces its app bundle, and reopens. Your saved settings and index are preserved;
 a version that changes the index format may rebuild its cache.
 
-In **Settings → General → Updates**:
+In **Settings → Updates**:
 
 - Turn off **Check for updates automatically** to stop startup and periodic checks.
 - Enable **Download and install updates automatically** to opt into background

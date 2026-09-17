@@ -2,7 +2,7 @@
 
 Measured September 15–16, 2026 on the development Mac using disposable synthetic indexes.
 Sections describe the implementation at the time of each measurement; the final section
-records the current shared-name cache and folder-scope changes.
+records the metadata-filter fast path.
 No real user index was opened or modified. These are local measurements, not latency or
 memory guarantees for every disk, filename distribution, or folder depth.
 
@@ -245,3 +245,29 @@ benchmark fixture was removed after measurement.
 A disposable AppKit/SwiftUI app using an isolated database verified result highlighting
 and history state. Native keyboard interaction additionally verified Space opening Quick
 Look, Escape closing it, and Up/Down recalling a search and restoring its draft.
+
+## Metadata-filter filename queries — September 16, 2026
+
+A disposable release-build XCTest harness compared the previous implementation with
+this change using 1,000,000 files under one root. Every 100,000th filename was
+`Vacation-<number>.heic`; the remainder were `resource-<number>.png`. The query was
+`type:image vacation`, sorted by descending size, and returned exactly ten files.
+Three searches were measured in each mode. Memory measurements exclude cache loading
+and sort preparation, as both were explicitly completed before searching.
+
+| Mode | Before | After |
+| --- | --- | --- |
+| Disk | 465.5–472.2 ms | 194.8–196.0 ms |
+| Warm memory cache | 462.5–468.1 ms | 2.3–2.4 ms |
+
+Previously metadata-filter queries bypassed the memory cache and extracted extensions
+for every candidate before matching names. Single-group filename queries without path
+or folder conditions now match packed names first, then apply metadata filters only
+to those candidates. Filtered candidates do not enter the ordinary literal-query reuse
+cache. Disk searches conservatively prefilter positive ASCII literal terms in SQLite;
+non-ASCII names bypass that prefilter to preserve Unicode matching.
+
+These measurements include exact counts, result sorting, and returned path construction,
+but exclude UI work. They do not measure the user's real index or Cardinal. Broad filters,
+cache loading, OR groups, and folder/path conditions have different performance.
+The harness and its generated indexes were temporary, outside the repository.

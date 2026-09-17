@@ -81,6 +81,79 @@ final class IndexServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testBuiltInExclusionsCanBeRemovedPersistedAndRestored() throws {
+        let suite = "EverywhereTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("everywhere-defaults-\(UUID())")
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let settings = IndexSettings(defaults: defaults)
+        settings.roots = ["/"]
+        XCTAssertEqual(settings.builtInExcludedFolders, FilesystemIndexer.defaultSkipPathPrefixes)
+        XCTAssertEqual(settings.builtInExcludedDirectoryNames, FilesystemIndexer.defaultSkipDirNames)
+        let db = try Database(path: directory.appendingPathComponent("index.sqlite").path)
+        let service = IndexService(settings: settings, database: db)
+        let original = service.makeConfig()
+        XCTAssertTrue(original.ignores(path: "/System/Volumes/Preboot/photo.heic"))
+        XCTAssertTrue(original.ignores(path: "/Users/example/.Trash/photo.heic"))
+        let checkpoint = IndexCheckpoint(eventID: 1, databasePath: db.path, config: original, volumes: ["/": "test"])
+        settings.builtInExcludedFolders.removeAll { $0 == "/System/Volumes" }
+        settings.builtInExcludedDirectoryNames.removeAll { $0 == ".Trash" }
+        let changed = service.makeConfig()
+        XCTAssertFalse(changed.ignores(path: "/System/Volumes/Preboot/photo.heic"))
+        XCTAssertFalse(changed.ignores(path: "/Users/example/.Trash/photo.heic"))
+        XCTAssertTrue(changed.ignores(path: "/dev/disk0"))
+        XCTAssertFalse(checkpoint.isValid(databasePath: db.path, config: changed, currentEventID: 1, volumes: ["/": "test"]))
+        let restored = IndexSettings(defaults: defaults)
+        XCTAssertEqual(restored.builtInExcludedFolders, settings.builtInExcludedFolders)
+        XCTAssertEqual(restored.builtInExcludedDirectoryNames, settings.builtInExcludedDirectoryNames)
+        settings.builtInExcludedFolders = []
+        settings.builtInExcludedDirectoryNames = []
+        let empty = IndexSettings(defaults: defaults)
+        XCTAssertTrue(empty.builtInExcludedFolders.isEmpty)
+        XCTAssertTrue(empty.builtInExcludedDirectoryNames.isEmpty)
+        XCTAssertTrue(service.makeConfig().ignores(path: db.path))
+        settings.builtInExcludedFolders = FilesystemIndexer.defaultSkipPathPrefixes
+        settings.builtInExcludedDirectoryNames = FilesystemIndexer.defaultSkipDirNames
+        XCTAssertTrue(service.makeConfig().ignores(path: "/System/Volumes/Preboot/photo.heic"))
+        settings.roots = ["/System/Volumes/Preboot"]
+        XCTAssertFalse(service.makeConfig().ignores(path: "/System/Volumes/Preboot/photo.heic"))
+    }
+
+    @MainActor
+    func testRemovedBuiltInNameExclusionAppliesToRebuildAndEvents() throws {
+        let suite = "EverywhereTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("everywhere-default-events-\(UUID())")
+        let trash = root.appendingPathComponent(".Trash")
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        try Data().write(to: trash.appendingPathComponent("vacation.heic"))
+        let settings = IndexSettings(defaults: defaults)
+        settings.roots = [root.path]
+        let db = try Database(path: root.appendingPathComponent("storage/index.sqlite").path)
+        let service = IndexService(settings: settings, database: db)
+        try FilesystemIndexer(db: db, config: service.makeConfig()).run()
+        XCTAssertEqual(try db.search(SearchRequest(text: "vacation")).total, 0)
+        settings.builtInExcludedDirectoryNames.removeAll { $0 == ".Trash" }
+        let config = service.makeConfig()
+        try Reconciler(db: db, config: config, roots: config.roots, skipUnchangedDirs: false).run()
+        XCTAssertEqual(try db.search(SearchRequest(text: "vacation")).total, 1)
+        let handler = ChangeHandler(db: db, config: config)
+        defer { handler.stop() }
+        try Data().write(to: trash.appendingPathComponent("new.heic"))
+        handler.ingest(events: [FileSystemEvent(path: trash.path, id: 1)])
+        handler.flushPendingNow()
+        XCTAssertEqual(try db.search(SearchRequest(text: "new.heic")).total, 1)
+        XCTAssertEqual(try db.search(SearchRequest(text: "sqlite")).total, 0)
+    }
+
+    @MainActor
     func testRebuildHonorsStorageFolderAndPatternExclusions() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("everywhere-exclusions-\(UUID())")
         let excluded = root.appendingPathComponent("cache")

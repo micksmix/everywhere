@@ -14,17 +14,16 @@ It indexes names and filesystem metadata, not document contents.
 - Native **?** syntax tips beside the search controls, with a full offline search guide.
 - Quick Look previews, bold match highlighting, and saved search history.
 - Open files, reveal them in Finder, choose an application, open a directory in your default terminal, and copy names or paths.
-- Runs in the menu bar when its windows are closed; open windows have normal app menus, a Dock icon, and a ⌘Tab entry. Includes a configurable global shortcut (default: **⌥Space**; change it in **Settings → General**).
+- Runs in the menu bar when its windows are closed; open windows have normal app menus, a Dock icon, and a ⌘Tab entry. Includes a configurable global shortcut (default: **⌥Space**; change it in **Settings → Shortcuts**).
 - Optional **Launch on Startup** in **Settings → General → Startup** opens Everywhere automatically when you log in. Enable it from the installed app; if macOS requests approval, use **Open Login Items…**.
 - Search the saved index on launch, with a configurable 120-second indexing countdown.
 - Pause/resume the countdown or scan, or disable indexing entirely in Settings.
 - Live filesystem updates with a status-bar toggle, and journal replay to catch changes made while the app was closed.
 - Configurable index locations and name-based exclusions.
-- Signed GitHub release updates with startup checks, optional automatic installation, and install-and-relaunch. Change update preferences in **Settings → General → Updates**.
+- Signed GitHub release updates with startup checks, optional automatic installation, and install-and-relaunch. Change update preferences in **Settings → Updates**.
 
 ![alt text](docs/everywhere-02.png)
 ![alt text](docs/everywhere-03.png)
-![alt text](docs/everywhere-04.png)
 ## Requirements
 
 - macOS 13 or later.
@@ -113,7 +112,7 @@ Run only one copy when testing the global shortcut.
 4. Type a filename fragment. Try `report`, or `ext:pdf` for PDF files. Click **?** beside the search controls for syntax examples.
 5. Select a result and press **⌘O**, or double-click it, to open it.
 
-Full Disk Access gives more complete results and fewer permission prompts. The same settings button is available in **Settings → Locations**. Enable Everywhere (use **+** to add it from Applications if needed), then quit and reopen the app. If already scanned, choose **Reindex Accessible Files** there. Everywhere indexes filenames and metadata, not file contents. See the
+Full Disk Access gives more complete results and fewer permission prompts. The same settings button is available in **Settings → File Access**. Enable Everywhere (use **+** to add it from Applications if needed), then quit and reopen the app. If already scanned, choose **Reindex Accessible Files** there. Everywhere indexes filenames and metadata, not file contents. See the
 [user guide](docs/USER_GUIDE.md) for setup, search examples, and troubleshooting.
 
 ### Filters, previews, and search history
@@ -165,6 +164,8 @@ separately in UserDefaults. Rebuilding replaces the index cache, not the indexed
 
 ## Documentation and development
 
+The GitHub Pages showcase is in `site/`. See [website preview and publishing](docs/WEBSITE.md) for setup and screenshot details.
+
 - [User guide](docs/USER_GUIDE.md): everyday tasks, search syntax, shortcuts, and troubleshooting.
 - [Contributor guidance](AGENTS.md): source layout, architecture constraints, and testing requirements.
 - [Icon design](Resources/AppIcon-design.md): the vector artwork and menu bar adaptation.
@@ -178,7 +179,7 @@ the source or `Scripts/make-icon.swift` changes.
 
 ### Index storage location
 
-In **Settings → Locations → Index Storage**, use **Choose Existing…** to select a saved
+In **Settings → Index Storage**, use **Choose Existing…** to select a saved
 Everywhere index, or **New File…** to choose where to build a new one. You can also enter
 an absolute file path and click **Apply**. Quit and reopen Everywhere to use the selected
 file. This does not move or copy the current index. **Use Default** restores
@@ -200,7 +201,7 @@ entries, indexing starts immediately when enabled. You can also choose another e
 
 ### Database compaction
 
-To reclaim unused space immediately, open **Settings → Locations → Index Storage** and
+To reclaim unused space immediately, open **Settings → Index Storage** and
 click **Compact Index Now**. This compacts the active index without rebuilding it and
 shows a completion message. It works during the startup countdown or with indexing
 disabled; wait for any running or paused scan to finish first. Manual compaction skips
@@ -213,12 +214,14 @@ shows **Compacting index…** while this runs. File updates may wait during comp
 searches continue using the saved index. Checks are deferred while scanning, paused,
 waiting for startup, or indexing is disabled.
 
-The Settings window opens taller to show more options. Drag its edges or corners to resize it; its minimum size keeps controls readable.
+Settings has a category sidebar on the left and a focused detail pane on the right.
+Search, indexing, locations, exclusions, storage, and file access have separate panes.
+Drag the window edges to resize it; longer panes scroll.
 
 ### Appearance and terminal application
 
 **Settings → General** lets you choose **System**, **Light**, or **Dark** appearance
-and select a terminal application for **Open in Terminal**. Both choices are saved and
+and **Settings → Terminal** selects the application for **Open in Terminal**. Both choices are saved and
 take effect immediately. Terminal.app is the default; custom terminals must support
 opening folder URLs. The search window includes the Everywhere icon in its title bar.
 
@@ -227,7 +230,7 @@ reconciled. Startup indexing catches up on changes made while Everywhere was clo
 Saved results may remain stale while indexing or live updates are disabled. Deleted
 entries free database space for reuse; the compaction described above reclaims disk space.
 
-Terminal quick-select buttons in **Settings → General → Terminal** find **Ghostty**,
+Terminal quick-select buttons in **Settings → Terminal** find **Ghostty**,
 **iTerm2**, **Warp**, **kitty**, or Apple **Terminal**. They check system and user
 Applications folders, Utilities folders, common Homebrew locations, and macOS’s
 registered applications. A match saves and displays the application path immediately.
@@ -236,13 +239,14 @@ You can still use **Choose Application…** to browse manually.
 
 ### Faster filename searches
 
-**Settings → General → Search Performance** includes **Keep filename index in memory**,
+**Settings → Search Performance** includes **Keep filename index in memory**,
 enabled by default. It caches packed names and metadata for substring, wildcard, OR, and
 negated filename searches;
 turn it off to use less active memory and query SQLite directly, which can be slower.
 The cache and selected sort order warm in the background while indexing is idle, and
-small index changes apply incrementally. Metadata filters, folder scopes, regex, whole-word,
-and other path queries use SQLite-backed engines. Folder scopes traverse parent links
+small index changes apply incrementally. Filename queries with metadata filters, such as
+`type:image vacation`, also use the cache when there are no OR groups or folder/path
+conditions. Other filtered queries, folder scopes, regex, and path queries use SQLite-backed engines. Folder scopes traverse parent links
 before filename matching. Full paths are not retained in the memory cache.
 
 Searches start immediately as you type. The first 200 results appear before more rows
@@ -269,12 +273,20 @@ binary index is created.
 
 Broad filename searches reuse up to three cached sort orders. Small file updates patch
 the cache and these orders; larger changes reload the cache. The table remembers the
-selected sort column and direction across launches. **Settings → General → Search
-Performance** shows estimated filename-cache and sort-array memory use.
+selected sort column and direction across launches. **Settings → Search Performance** shows estimated filename-cache and sort-array memory use.
 
-**Settings → Locations** now includes **Excluded Folders** with a folder chooser and
+**Settings → Custom Exclusions** includes **Excluded Folders** with a folder chooser and
 **Excluded Name Patterns** such as `*.tmp; *.log`. Patterns match whole names; existing
 substring exclusions still work separately. Rebuild the index after changing exclusions.
+
+**Settings → Built-in Exclusions** lists the default path and name rules,
+including `/System/Volumes`. Remove a rule with its minus button, then choose
+**Search → Rebuild Index** to include those locations. Removals persist across launches;
+**Restore Built-in Exclusions** restores the defaults without changing custom exclusions.
+Name rules apply anywhere, so another overlapping rule may still exclude a folder.
+Explicit index locations continue to override built-in path exclusions. The app's own
+index-storage folder is shown separately as a locked exclusion to prevent indexing its
+own writes.
 
 Schema version 4 rebuilds indexes from older schemas to remove duplicate paths created
 by folder updates. Live updates reuse the existing indexed folder tree.

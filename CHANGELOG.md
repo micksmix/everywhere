@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.0
+
+- Make the main search window behave like a normal macOS window instead of staying above other windows.
+- Speed up metadata-filtered filename searches such as `type:image vacation` by using the packed filename cache and SQLite literal prefilters while preserving exact counts, sorting, pagination, and disk/memory result parity.
+- Make built-in indexing exclusions visible in Settings, including `/System/Volumes`, with individual remove controls, persistent changes, and a Restore Built-in Exclusions action. Explicit index locations can override built-in path exclusions; the app's own index folder remains a protected exclusion.
+- Reorganize Settings into a sidebar with focused detail panes for general preferences, shortcuts, terminal selection, updates, search performance, indexing, locations, custom exclusions, built-in exclusions, index storage, and file access.
+- Expand search-performance and exclusion documentation, including why results can differ from other search tools when system-volume paths are excluded.
+
 ## 1.1.0
 
 - Add signed GitHub release updates via Sparkle: check on startup, check manually, optionally install automatically, and relaunch after updating; controls are in Settings → General → Updates.

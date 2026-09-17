@@ -464,8 +464,8 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         live = false
     }
 
-    private func makeConfig() -> IndexConfig {
-        var prefixes = FilesystemIndexer.defaultSkipPathPrefixes.filter { prefix in
+    func makeConfig() -> IndexConfig {
+        var prefixes = settings.builtInExcludedFolders.filter { prefix in
             !settings.roots.contains { root in
                 let canonical = Walk.canonicalPath(root)
                 return canonical == prefix || canonical.hasPrefix(prefix + "/")
@@ -483,7 +483,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
             exclusions: settings.exclusions,
             namePatterns: settings.excludedNamePatterns,
             skipPathPrefixes: prefixes,
-            skipDirNames: FilesystemIndexer.defaultSkipDirNames
+            skipDirNames: settings.builtInExcludedDirectoryNames
         )
     }
 }

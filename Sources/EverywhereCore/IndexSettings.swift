@@ -64,6 +64,14 @@ public final class IndexSettings: ObservableObject {
         didSet { defaults.set(exclusions, forKey: Self.exclusionsKey) }
     }
 
+    @Published public var builtInExcludedFolders: [String] {
+        didSet { defaults.set(builtInExcludedFolders, forKey: "IndexBuiltInExcludedFolders") }
+    }
+
+    @Published public var builtInExcludedDirectoryNames: [String] {
+        didSet { defaults.set(builtInExcludedDirectoryNames, forKey: "IndexBuiltInExcludedDirectoryNames") }
+    }
+
     @Published public var excludedFolders: [String] {
         didSet { defaults.set(excludedFolders, forKey: "IndexExcludedFolders") }
     }
@@ -93,6 +101,8 @@ public final class IndexSettings: ObservableObject {
             defaults.set(["/"], forKey: Self.rootsKey)
         }
         exclusions = defaults.stringArray(forKey: Self.exclusionsKey) ?? []
+        builtInExcludedFolders = defaults.stringArray(forKey: "IndexBuiltInExcludedFolders") ?? FilesystemIndexer.defaultSkipPathPrefixes
+        builtInExcludedDirectoryNames = defaults.stringArray(forKey: "IndexBuiltInExcludedDirectoryNames") ?? FilesystemIndexer.defaultSkipDirNames
         excludedFolders = defaults.stringArray(forKey: "IndexExcludedFolders") ?? []
         excludedNamePatterns = defaults.stringArray(forKey: "IndexExcludedNamePatterns") ?? []
         if defaults.object(forKey: Self.liveKey) == nil {

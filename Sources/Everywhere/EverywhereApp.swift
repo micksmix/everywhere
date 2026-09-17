@@ -87,7 +87,7 @@ struct EverywhereApp: App {
                 .environmentObject(hotKeyManager)
         }
         .windowResizability(.contentMinSize)
-        .defaultSize(width: 560, height: 700)
+        .defaultSize(width: 900, height: 700)
     }
 }
 

@@ -18,7 +18,7 @@ struct FullDiskAccessView: View {
                     return NSWorkspace.shared.open(url)
                 }
             }
-            Text("In System Settings → Privacy & Security → Full Disk Access, enable Everywhere. If missing, use + to add Everywhere from Applications. Then quit and reopen Everywhere; if you already scanned, reindex in Settings → Locations.")
+            Text("In System Settings → Privacy & Security → Full Disk Access, enable Everywhere. If missing, use + to add Everywhere from Applications. Then quit and reopen Everywhere; if you already scanned, reindex in Settings → File Access.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if couldNotOpen {
