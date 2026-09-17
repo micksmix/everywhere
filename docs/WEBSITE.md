@@ -11,7 +11,7 @@ From the repository root:
 python3 -m http.server 8765 --bind 127.0.0.1 --directory site
 ```
 
-Open http://127.0.0.1:8765. The clipboard button works on localhost and HTTPS.
+Open http://127.0.0.1:8765. The installation copy buttons work on localhost and HTTPS.
 
 ## Publish to GitHub Pages
 
@@ -39,6 +39,6 @@ Update copy in `site/index.html`, styles in `site/style.css`, and the copy butto
 `site/script.js`. Keep image links relative so the site works under the repository's
 `/everywhere/` path. Open the screenshot links to see them at full size.
 
-Before publishing edits, check desktop and narrow mobile layouts, the Homebrew copy
-button, local asset loading, and destination links. Run `make test` as required by
+Before publishing edits, check desktop and narrow mobile layouts, both installation copy
+buttons, local asset loading, and destination links. Run `make test` as required by
 repository guidance.
