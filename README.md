@@ -20,6 +20,7 @@ It indexes names and filesystem metadata, not document contents.
 - Pause/resume the countdown or scan, or disable indexing entirely in Settings.
 - Live filesystem updates with a status-bar toggle, and journal replay to catch changes made while the app was closed.
 - Configurable index locations and name-based exclusions.
+- Signed GitHub release updates with startup checks, optional automatic installation, and install-and-relaunch. Change update preferences in **Settings → General → Updates**.
 
 ![alt text](docs/everywhere-02.png)
 ![alt text](docs/everywhere-03.png)
@@ -30,7 +31,7 @@ It indexes names and filesystem metadata, not document contents.
 - To build: a Swift 5.9 or newer toolchain, a macOS SDK, and Apple's command-line build tools.
   The package uses Swift 5 language mode.
 - To bundle the offline Help book: Python 3 and [Pandoc](https://pandoc.org/installing.html) (`brew install pandoc`).
-- SQLite and the macOS frameworks supplied by the operating system; no third-party Swift packages are required.
+- SQLite and the macOS frameworks supplied by the operating system. Swift Package Manager downloads the pinned [Sparkle](https://sparkle-project.org) updater dependency.
 
 ## Install with one command
 
@@ -42,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/micksmix/everywhere/main/Scripts/in
 
 The script fetches the newest release zip from GitHub and installs it to
 /Applications. Because `curl` does not apply macOS's quarantine flag, no
-Gatekeeper prompt appears. Re-run the script to update to the latest release.
+Gatekeeper prompt appears. Use **Everywhere → Check for Updates…** for subsequent updates, or re-run the script.
 
 ## Install with Homebrew
 
@@ -348,6 +349,7 @@ local Git credentials need permission to push that tag, but your local `gh`
 login is not used by the workflow. Both the source repository and the tap
 should be public so Homebrew users can download the release without credentials.
 Enable GitHub Actions in `micksmix/everywhere` before the first release.
+Configure the `SPARKLE_PRIVATE_KEY` repository secret using the [update release setup](docs/UPDATES.md) before publishing an update-enabled build. Each release includes a signed `appcast.xml` alongside the universal zip.
 
 The build needs no personal access token. Publishing the zip to
 `micksmix/everywhere` uses GitHub's automatically supplied `GITHUB_TOKEN`, with

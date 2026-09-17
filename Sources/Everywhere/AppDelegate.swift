@@ -77,6 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppPreferences.shared.applyAppearance()
         statusController.install()
+        AppUpdater.shared.start()
         hotKeyManager?.activate()
     }
 

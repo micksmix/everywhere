@@ -5,6 +5,7 @@ VERSION := 1.0.0
 BUNDLE_ID := app.everywhere.macos
 BIN_DIR := $(shell swift build -c $(CONFIG) --show-bin-path)
 DIST_BIN_DIR = $(shell swift build -c $(CONFIG) --arch arm64 --arch x86_64 --show-bin-path)
+SPARKLE_DIR := .build/artifacts/sparkle/Sparkle
 APP_DIR := .build/$(APP_NAME).app
 DIST_ZIP := .build/$(APP_NAME)-$(VERSION).zip
 
@@ -28,25 +29,29 @@ app: build Resources/AppIcon.icns
 bundle: Resources/AppIcon.icns
 	@mkdir -p "$(APP_DIR)/Contents/MacOS" "$(APP_DIR)/Contents/Resources"
 	@cp Info.plist "$(APP_DIR)/Contents/Info.plist"
+	@plutil -replace CFBundleVersion -string "$(VERSION)" "$(APP_DIR)/Contents/Info.plist"
 	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(APP_DIR)/Contents/Info.plist"
 	@plutil -replace CFBundleIdentifier -string "$(BUNDLE_ID)" "$(APP_DIR)/Contents/Info.plist"
 	@cp "$(BIN_DIR)/$(APP_NAME)" "$(APP_DIR)/Contents/MacOS/$(APP_NAME)"
 	@cp Resources/AppIcon.icns "$(APP_DIR)/Contents/Resources/AppIcon.icns"
 	@cp Resources/Credits.html LICENSE "$(APP_DIR)/Contents/Resources/"
 	$(PYTHON) Scripts/make-help.py "$(APP_DIR)/Contents/Resources/Everywhere.help"
+	@mkdir -p "$(APP_DIR)/Contents/Frameworks"
+	@ditto "$(SPARKLE_DIR)/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework" "$(APP_DIR)/Contents/Frameworks/Sparkle.framework"
+	@cp "$(SPARKLE_DIR)/LICENSE" "$(APP_DIR)/Contents/Resources/Sparkle-LICENSE"
 	@codesign --force --sign - "$(APP_DIR)"
 	@touch "$(APP_DIR)"
 	@echo "Built $(APP_DIR)"
 
 dist: Resources/AppIcon.icns
-	swift build -c $(CONFIG) --arch arm64 --arch x86_64
+	swift build -c $(CONFIG) --arch arm64 --arch x86_64 --product $(APP_NAME)
 	@$(MAKE) --no-print-directory bundle BIN_DIR=$(DIST_BIN_DIR)
 	$(PYTHON) -c 'import subprocess; assert set(subprocess.check_output(["lipo", "-archs", "$(APP_DIR)/Contents/MacOS/$(APP_NAME)"], text=True).split()) == {"arm64", "x86_64"}, "Universal app must contain ARM64 and x86_64"'
-	codesign --verify --strict "$(APP_DIR)"
+	codesign --verify --deep --strict "$(APP_DIR)"
 	ditto -c -k --keepParent "$(APP_DIR)" "$(DIST_ZIP)"
 	@cd .build && shasum -a 256 "$(APP_NAME)-$(VERSION).zip" > "$(APP_NAME)-$(VERSION).zip.sha256"
 	@cat "$(DIST_ZIP).sha256"
-	@echo "Upload $(DIST_ZIP) to a GitHub release tagged v$(VERSION), then record the SHA256 above in the tap's Casks/everywhere.rb."
+	@echo "Built $(DIST_ZIP). Publish with make release VERSION=x.y.z so Actions also signs the update feed; see docs/UPDATES.md."
 
 bump:
 	@if [ -z "$(VERSION)" ]; then echo "Usage: make bump VERSION=x.y.z" >&2; exit 1; fi

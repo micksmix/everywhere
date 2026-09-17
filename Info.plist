@@ -36,6 +36,18 @@
 	<string>Everywhere.help</string>
 	<key>CFBundleHelpBookName</key>
 	<string>app.everywhere.macos.help</string>
+	<key>SUFeedURL</key>
+	<string>https://github.com/micksmix/everywhere/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>yfNoAA2ve8uG24PSXUsMMOQFxI5YTqLWQ5Eab9lTyVU=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUEnableSystemProfiling</key>
+	<false/>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

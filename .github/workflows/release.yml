@@ -30,6 +30,15 @@ jobs:
           test "$(sed -n 's/^VERSION := //p' Makefile)" = "$version"
           echo "VERSION=$version" >> "$GITHUB_ENV"
 
+      - name: Check update signing configuration
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "Set the SPARKLE_PRIVATE_KEY repository secret. See docs/UPDATES.md."
+            exit 1
+          fi
+
       - name: Test
         run: make test
 
@@ -38,14 +47,32 @@ jobs:
           brew install pandoc
           make dist VERSION="$VERSION"
 
+      - name: Prepare signed update feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          mkdir -p .build/update-feed
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release download "$GITHUB_REF_NAME" --pattern "Everywhere-$VERSION.zip" --dir .build/update-feed
+          else
+            cp ".build/Everywhere-$VERSION.zip" .build/update-feed/
+          fi
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | .build/artifacts/sparkle/Sparkle/bin/generate_appcast \
+            --ed-key-file - --maximum-deltas 0 \
+            --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/" \
+            --link "https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME" \
+            .build/update-feed
+          python3 Scripts/verify-appcast.py .build/update-feed/appcast.xml ".build/update-feed/Everywhere-$VERSION.zip"
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release download "$GITHUB_REF_NAME" --pattern "Everywhere-$VERSION.zip" --dir existing-release
+            gh release upload "$GITHUB_REF_NAME" .build/update-feed/appcast.xml --clobber
           else
-            gh release create "$GITHUB_REF_NAME" ".build/Everywhere-$VERSION.zip" ".build/Everywhere-$VERSION.zip.sha256" \
+            gh release create "$GITHUB_REF_NAME" ".build/Everywhere-$VERSION.zip" ".build/Everywhere-$VERSION.zip.sha256" .build/update-feed/appcast.xml \
               --verify-tag --title "v$VERSION" --generate-notes
           fi
 

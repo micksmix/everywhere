@@ -536,3 +536,28 @@ Use **Search → Rebuild Index** after adding or removing exclusions. The rules 
 to the initial scan and live updates. The app's index-storage folder is always excluded.
 
 Live folder updates reuse the existing indexed folder tree.
+
+
+## Updating Everywhere
+
+Everywhere checks for new stable GitHub releases at startup and once a day while
+running. When an update is available, choose **Install Update**, then **Install
+and Relaunch** when prompted. Everywhere downloads and verifies the release,
+replaces its app bundle, and reopens. Your saved settings and index are preserved;
+a version that changes the index format may rebuild its cache.
+
+In **Settings → General → Updates**:
+
+- Turn off **Check for updates automatically** to stop startup and periodic checks.
+- Enable **Download and install updates automatically** to opt into background
+  updates, which can install when you quit. This is off by default. Some updates
+  still require an installation prompt or macOS authorization.
+- Choose **Check for Updates…** to check manually, even when automatic checks are off.
+  The same command is in the **Everywhere** menu. Manual checks also show releases
+  you previously chose to skip.
+
+Use an installed, writable copy of Everywhere rather than running it inside a
+mounted disk image. Network failures leave your current version usable; retry with
+**Check for Updates…**. You can also update using Homebrew or the install script.
+If you prefer Homebrew to manage updates, disable automatic checks in Everywhere.
+Older versions without these controls need one manual update first.

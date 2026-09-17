@@ -75,6 +75,7 @@ struct EverywhereApp: App {
                     AppHelp.showSearchSyntax()
                 }
             }
+            UpdateCommands()
             SearchCommands(viewModel: viewModel, indexService: indexService, settings: settings)
         }
 
@@ -168,6 +169,17 @@ struct SearchCommands: Commands {
                 indexService.rebuild()
             }
             .disabled(!settings.indexingEnabled || (indexService.isBusy && indexService.phase != .waiting))
+        }
+    }
+}
+
+struct UpdateCommands: Commands {
+    @ObservedObject private var updater = AppUpdater.shared
+
+    var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Check for Updates…", action: updater.checkForUpdates)
+                .disabled(!updater.canCheckForUpdates)
         }
     }
 }

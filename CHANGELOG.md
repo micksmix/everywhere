@@ -2,6 +2,7 @@
 
 ## 1.1.0
 
+- Add signed GitHub release updates via Sparkle: check on startup, check manually, optionally install automatically, and relaunch after updating; controls are in Settings → General → Updates.
 - Add search filters: `ext:`, `type:`, `file:`, `folder:`, `size:`, and `dm:` (date modified), combinable with name terms, phrases, wildcards, `!`, and `|` groups; quoted filter tokens stay literal.
 - Add folder scopes with `in:` (all descendants) and `parent:` (direct children), plus fast trailing-slash path-prefix searches via recursive index traversal.
 - Add Quick Look previews: Space toggles the panel, ⌘Y and a context-menu item open it for the selection; the preview refreshes as selection or results change.

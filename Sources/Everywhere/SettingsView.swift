@@ -8,6 +8,7 @@ struct SettingsView: View {
     @EnvironmentObject var settings: IndexSettings
     @EnvironmentObject var indexService: IndexService
     @EnvironmentObject var hotKeyManager: HotKeyManager
+    @ObservedObject private var updater = AppUpdater.shared
     @ObservedObject private var preferences = AppPreferences.shared
     @StateObject private var launchAtLogin = LaunchAtLogin()
     @State private var terminalMessage: String?
@@ -62,6 +63,27 @@ struct SettingsView: View {
                 if !launchAtLogin.isAppBundle {
                     Text("Open the Everywhere app from Applications to change this setting.")
                 }
+            }
+            Section {
+                Toggle("Check for updates automatically", isOn: Binding(
+                    get: { updater.automaticallyChecksForUpdates },
+                    set: updater.setAutomaticChecks
+                ))
+                .disabled(updater.unavailableReason != nil)
+                Toggle("Download and install updates automatically", isOn: Binding(
+                    get: { updater.automaticallyDownloadsUpdates },
+                    set: updater.setAutomaticDownloads
+                ))
+                .disabled(!updater.automaticallyChecksForUpdates || updater.unavailableReason != nil)
+                Button("Check for Updates…", action: updater.checkForUpdates)
+                    .disabled(!updater.canCheckForUpdates)
+                if let reason = updater.unavailableReason {
+                    Text(reason).foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Updates")
+            } footer: {
+                Text("Checks GitHub releases at startup and daily while Everywhere is running. Choose Install Update to download, replace the app, and relaunch. Automatic installation is optional; when enabled, updates can install when you quit.")
             }
             Section {
                 Toggle("Keep filename index in memory", isOn: $preferences.keepSearchIndexInMemory)
