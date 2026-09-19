@@ -248,6 +248,10 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         remainingDelay = max(0, deadline.timeIntervalSince(now))
         countdownSeconds = Int(ceil(remainingDelay))
         guard remainingDelay == 0 else { return }
+        beginCatchUp()
+    }
+
+    private func beginCatchUp() {
         cancelCountdown()
         activeControl.cancel()
         let control = IndexingControl()
@@ -399,13 +403,22 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     }
 
     public func setLive(_ enabled: Bool) {
-        guard launchAccessState == .ready, settings.indexingEnabled, !settings.needsLocationSetup, phase == .idle else { return }
-        if enabled {
-            if let checkpoint = validCheckpoint() { replayChanges(checkpoint) }
-            else { reconcileAndMonitor() }
-        } else {
-            stopMonitor()
+        settings.liveUpdates = enabled
+        guard enabled else {
+            if phase == .idle { stopMonitor() }
+            return
         }
+        guard launchAccessState == .ready, settings.indexingEnabled, !settings.needsLocationSetup else { return }
+        if monitor != nil {
+            live = true
+            return
+        }
+        if phase == .waiting {
+            cancelCountdown()
+        }
+        guard phase == .waiting || phase == .idle else { return }
+        if let checkpoint = validCheckpoint() { replayChanges(checkpoint) }
+        else { reconcileAndMonitor() }
     }
 
     private func startMonitor(checkpoint: IndexCheckpoint, suspended: Bool = false) -> Bool {
@@ -453,6 +466,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         }
         self.monitor = monitor
         changeHandler = handler
+        live = settings.liveUpdates
         return true
     }
 

@@ -77,6 +77,7 @@ struct SettingsView: View {
         switch category {
         case .general:
             appearanceSection
+            quitSection
             startupSection
         case .shortcuts: shortcutSection
         case .terminal: terminalSection
@@ -182,6 +183,20 @@ struct SettingsView: View {
                     Text(appearance.rawValue).tag(appearance)
                 }
             }
+        }
+    }
+
+    private var quitSection: some View {
+        Section {
+            Toggle("Always quit without asking", isOn: $preferences.quitWithoutPrompt)
+        } header: {
+            Text("Quitting")
+        } footer: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("When off, quitting asks whether to quit or minimize instead. Minimizing closes the window and keeps Everywhere in the menu bar, still updating the index.")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .multilineTextAlignment(.leading)
         }
     }
 
@@ -313,11 +328,8 @@ struct SettingsView: View {
     private var liveUpdatesSection: some View {
         Section {
             Toggle("Watch the file system for changes", isOn: Binding(
-                get: { settings.liveUpdates },
-                set: { newValue in
-                    settings.liveUpdates = newValue
-                    indexService.setLive(newValue)
-                }
+                get: { indexService.live },
+                set: { indexService.setLive($0) }
             ))
             .disabled(!settings.indexingEnabled)
         } header: {

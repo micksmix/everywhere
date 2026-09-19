@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0
+
+- Replace the Live Updates button with a switch that shows whether the file system is actually being watched and starts or stops watching immediately, independent of indexing scans and the startup delay.
+- Center the app icon next to the Everywhere name in the main window's title bar.
+- Ask before quitting whether to quit or minimize to the menu bar; enable Settings → General → Quitting → Always quit without asking to quit immediately.
+
 ## 1.2.0
 
 - Make the main search window behave like a normal macOS window instead of staying above other windows.

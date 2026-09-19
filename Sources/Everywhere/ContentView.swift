@@ -120,7 +120,7 @@ struct ContentView: View {
                         .frame(width: 6, height: 6)
                     Text("Live")
                 } else {
-                    Text("Live updates paused")
+                    Text("Live updates off")
                 }
             }
         }
@@ -141,14 +141,10 @@ struct ContentView: View {
                     indexState
                 }
                 Toggle("Live Updates", isOn: Binding(
-                    get: { settings.liveUpdates },
-                    set: { enabled in
-                        settings.liveUpdates = enabled
-                        indexService.setLive(enabled)
-                    }
+                    get: { indexService.live },
+                    set: { indexService.setLive($0) }
                 ))
-                .toggleStyle(.button)
-                .buttonStyle(.bordered)
+                .toggleStyle(.switch)
                 .controlSize(.small)
                 .fixedSize()
                 .disabled(!settings.indexingEnabled)

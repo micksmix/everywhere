@@ -49,6 +49,9 @@ if minimized, or creates a window if one is unavailable.
 
 Closing the window keeps the app running. To quit, use **⌘Q** or right-click the
 menu-bar icon and choose **Quit Everywhere**. The shortcut works only while the app is running.
+By default, quitting first asks whether to quit or minimize instead; choose **Minimize**
+to close the window and keep Everywhere in the menu bar. Enable
+**Settings → General → Quitting → Always quit without asking** to quit immediately.
 
 To start automatically when you log in to your Mac, open the installed app and enable
 **Settings → General → Startup → Launch on Startup**. You can open **Settings…** by
@@ -318,9 +321,11 @@ The spinner indicates activity, not a percentage or an estimated finish time.
 
 ## Manage live updates and startup checks
 
-Click **Live Updates** in the window's bottom status bar to toggle monitoring. The button
-is selected when live updates are enabled and is unavailable while indexing is disabled.
-The same setting is available in **Settings… → Indexing → Live Updates → Watch the file system for changes**.
+Use the **Live Updates** switch in the window's bottom status bar to toggle monitoring.
+The switch shows the actual state: it is on (and the status bar shows a green **Live** dot)
+only while the file system is being watched, and off when monitoring is stopped. It is
+unavailable while indexing is disabled. The same control is available in
+**Settings… → Indexing → Live Updates → Watch the file system for changes**.
 Turn it on to keep the index up to date while Everywhere runs. Turn it off to stop ongoing monitoring after any current
 startup catch-up finishes. This setting is separate from pausing an active scan.
 
