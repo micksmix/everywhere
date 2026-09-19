@@ -1,7 +1,7 @@
 APP_NAME := Everywhere
 CONFIG ?= release
 PYTHON ?= python3
-VERSION := 1.2.0
+VERSION := 1.3.0
 BUNDLE_ID := app.everywhere.macos
 BIN_DIR := $(shell swift build -c $(CONFIG) --show-bin-path)
 DIST_BIN_DIR = $(shell swift build -c $(CONFIG) --arch arm64 --arch x86_64 --show-bin-path)
