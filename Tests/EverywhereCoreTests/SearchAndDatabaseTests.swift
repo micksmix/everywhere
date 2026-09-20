@@ -475,6 +475,50 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(ascending.entries.map(\.name), ["small.txt", "mid.txt", "large.txt"])
     }
 
+    func testRegexSortBySizeMatchesDiskAndMemory() throws {
+        try tree.add(path: "/d1/kingfisher", size: 500)
+        try tree.add(path: "/d2/kingfisher", size: 100)
+        try tree.add(path: "/d3/kingfisher", size: 300)
+        try tree.add(path: "/d4/kingfisher.txt", size: 900)
+        try tree.add(path: "/d5/other", size: 400)
+
+        for memory in [false, true] {
+            let ascending = try db.search(SearchRequest(text: "^kingfisher$", useRegex: true, sortKey: .size, ascending: true), useMemory: memory)
+            XCTAssertEqual(ascending.entries.map(\.size), [100, 300, 500])
+            XCTAssertEqual(ascending.total, 3)
+            let descending = try db.search(SearchRequest(text: "^kingfisher$", useRegex: true, sortKey: .size, ascending: false), useMemory: memory)
+            XCTAssertEqual(descending.entries.map(\.size), [500, 300, 100])
+            XCTAssertEqual(descending.total, 3)
+        }
+    }
+
+    func testRegexPrefilterEquivalenceAcrossMemoryAndDisk() throws {
+        try tree.add(path: "/a/invoice-2024.pdf", size: 30)
+        try tree.add(path: "/b/invoice-1999.pdf", size: 10)
+        try tree.add(path: "/c/unrelated.txt", size: 20)
+        try tree.add(path: "/d/Invoice-20.doc", size: 40)
+        for memory in [false, true] {
+            let result = try db.search(SearchRequest(text: "invoice-\\d\\d\\d\\d\\.pdf", useRegex: true, sortKey: .size, ascending: true), useMemory: memory)
+            XCTAssertEqual(result.entries.map(\.path), ["/b/invoice-1999.pdf", "/a/invoice-2024.pdf"])
+            let noLiteral = try db.search(SearchRequest(text: "\\d\\d\\d", useRegex: true, sortKey: .size, ascending: true), useMemory: memory)
+            XCTAssertEqual(noLiteral.entries.map(\.name), ["invoice-1999.pdf", "invoice-2024.pdf"])
+        }
+    }
+
+    func testRegexMemoryPathRespectsKindAndHiddenFilters() throws {
+        try tree.add(path: "/root/kingfisher", isDir: true, size: 0)
+        try tree.add(path: "/root/.kingfisher", size: 5)
+        try tree.add(path: "/root/kingfisher2", size: 6)
+        for memory in [false, true] {
+            let files = try db.search(SearchRequest(text: "kingfisher", kind: .files, useRegex: true, sortKey: .size, ascending: true), useMemory: memory)
+            XCTAssertEqual(files.entries.map(\.size), [5, 6])
+            let folders = try db.search(SearchRequest(text: "kingfisher", kind: .folders, useRegex: true, sortKey: .size, ascending: true), useMemory: memory)
+            XCTAssertEqual(folders.entries.map(\.size), [0])
+            let noHidden = try db.search(SearchRequest(text: "kingfisher", includeHidden: false, useRegex: true, sortKey: .size, ascending: true), useMemory: memory)
+            XCTAssertEqual(noHidden.entries.map(\.size), [0, 6])
+        }
+    }
+
     func testUpsertOnConflict() throws {
         let id = try tree.add(path: "/file.txt", size: 1)
         try db.insert(rows: [IndexRow(id: id + 500, parent: try db.ensureRootRow(path: "/"), name: "file.txt", isDir: false, size: 42, modified: 0)])

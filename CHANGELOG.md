@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.0
+
+- Speed up regex searches by matching names in the packed filename cache with the same literal prefilter and regex semantics as the SQLite path; name-only regexes now reuse cached sort orders, so sorting regex results is fast.
+- Ask for confirmation before opening files from double-click, Return, ⌘O, or the context menu; check Don't Ask Again in the dialog, or use Settings → General → Opening Files → Ask before opening files, to open immediately.
+- Show Searching… in the status bar when a search takes longer than a fraction of a second, so slow re-sorts and broad queries no longer look unresponsive.
+
 ## 1.3.0
 
 - Replace the Live Updates button with a switch that shows whether the file system is actually being watched and starts or stops watching immediately, independent of indexing scans and the startup delay.

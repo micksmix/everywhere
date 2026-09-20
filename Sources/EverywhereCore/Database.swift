@@ -677,7 +677,7 @@ public final class Database: @unchecked Sendable {
         } else if useRegex && request.matchPath {
             result = try scanSearch(request, useRegex: true)
         } else if useRegex {
-            result = try regexSearch(request)
+            result = try regexSearch(request, useMemory: useMemory)
         } else if FilterQuery.containsFilters(request.text) {
             result = try filteredSearch(request, useMemory: useMemory)
         } else if isNameQuery(request), !request.wholeWord {
@@ -1113,7 +1113,27 @@ public final class Database: @unchecked Sendable {
         return SearchResult(entries: entries, total: total, elapsedMS: 0)
     }
 
-    private func regexSearch(_ request: SearchRequest) throws -> SearchResult {
+    private func regexSearch(_ request: SearchRequest, useMemory: Bool) throws -> SearchResult {
+        if useMemory {
+            try refreshMemoryIndex()
+            if let memoryRows {
+                let run = Self.longestGuaranteedLiteralRun(in: request.text)
+                let literal: String? = run.flatMap { candidate in
+                    (candidate.count >= 3 && candidate.allSatisfy(\.isASCII)) ? candidate.lowercased() : nil
+                }
+                let box = regexBox
+                let selected = try memoryRows.selectRegex(request: request, cancellation: searchCancellation, literal: literal) { name in
+                    box.matches(name)
+                }
+                let paths = try materializePaths(ids: selected.rows.map { $0.0.id })
+                let entries = selected.rows.map { row, name in
+                    Entry(id: row.id, path: paths[row.id] ?? name, name: name, isDirectory: row.isDirectory,
+                          size: row.size, modified: Date(timeIntervalSince1970: row.modified))
+                }
+                return SearchResult(entries: entries, total: selected.total, elapsedMS: 0)
+            }
+        }
+
         var candidates: [(id: Int64, parent: Int64, name: String, isDir: Bool, size: Int64, modified: Double)] = []
 
         if let literal = Self.longestGuaranteedLiteralRun(in: request.text),

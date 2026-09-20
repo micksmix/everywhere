@@ -78,7 +78,8 @@ Simple name searches match literal fragments anywhere in a name: `port` finds
 
 The table loads 200 results initially and adds pages as you scroll. The status bar shows
 loaded rows, the full match count, and request-to-publication time (excluding table drawing).
-Clearing the search with its **×** button or **⌘K** returns to recently modified items. This empty-search view
+While a slow search is running, the status bar shows **Searching…** in place of the previous
+counts. Clearing the search with its **×** button or **⌘K** returns to recently modified items. This empty-search view
 uses modification order and respects the All/Files/Folders filter; use a nonempty query
 when applying other result sorting.
 
@@ -234,6 +235,12 @@ Open in Terminal uses Terminal.app by default. In **Settings → Terminal**,
 click **Choose Application…** to select another terminal. The choice is saved and applies
 immediately. **Use Default** restores Terminal.app. The selected application must support
 opening folder URLs. Launch errors are shown in an alert.
+
+By default, opening asks for confirmation first: double-clicking a result, pressing
+Return, using **⌘O**, or choosing **Open** in the context menu shows a sheet with
+**Open** and **Cancel** buttons. Check **Don’t Ask Again** to open immediately from now
+on; the same choice is available as **Settings → General → Opening Files → Ask before
+opening files**, where you can turn the confirmation back on.
 
 For a file, Open in Terminal uses its containing directory. Copied names or paths from
 multiple selections are separated by newlines. Open actions handle up to ten items at

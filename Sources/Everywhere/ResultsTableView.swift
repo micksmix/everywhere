@@ -324,9 +324,7 @@ struct ResultsTableView: NSViewRepresentable {
         }
 
         @objc private func openFromMenu(_ sender: Any?) {
-            for entry in targetEntries().prefix(10) {
-                ContentViewModel.open(entry)
-            }
+            viewModel.confirmAndOpen(targetEntries())
         }
 
         @objc private func revealFromMenu(_ sender: Any?) {

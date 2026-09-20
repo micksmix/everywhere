@@ -56,6 +56,10 @@ final class AppPreferences: ObservableObject {
         didSet { UserDefaults.standard.set(keepSearchIndexInMemory, forKey: "KeepSearchIndexInMemory") }
     }
 
+    @Published var confirmBeforeOpening: Bool {
+        didSet { UserDefaults.standard.set(confirmBeforeOpening, forKey: "ConfirmBeforeOpening") }
+    }
+
     @Published var quitWithoutPrompt: Bool {
         didSet { UserDefaults.standard.set(quitWithoutPrompt, forKey: "QuitWithoutPrompt") }
     }
@@ -74,6 +78,8 @@ final class AppPreferences: ObservableObject {
     private init() {
         keepSearchIndexInMemory = UserDefaults.standard.object(forKey: "KeepSearchIndexInMemory") == nil
             || UserDefaults.standard.bool(forKey: "KeepSearchIndexInMemory")
+        confirmBeforeOpening = UserDefaults.standard.object(forKey: "ConfirmBeforeOpening") == nil
+            || UserDefaults.standard.bool(forKey: "ConfirmBeforeOpening")
         quitWithoutPrompt = UserDefaults.standard.bool(forKey: "QuitWithoutPrompt")
         terminalPath = UserDefaults.standard.string(forKey: "TerminalApplicationPath") ?? ""
         appearance = Appearance(rawValue: UserDefaults.standard.string(forKey: "ApplicationAppearance") ?? "") ?? .system

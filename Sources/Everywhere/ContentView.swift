@@ -82,6 +82,7 @@ struct ContentView: View {
     }
 
     private var resultSummary: String {
+        if viewModel.showsSearchIndicator { return "Searching…" }
         if let error = viewModel.searchError {
             return error
         }

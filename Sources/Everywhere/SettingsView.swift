@@ -77,6 +77,7 @@ struct SettingsView: View {
         switch category {
         case .general:
             appearanceSection
+            openingSection
             quitSection
             startupSection
         case .shortcuts: shortcutSection
@@ -194,6 +195,20 @@ struct SettingsView: View {
         } footer: {
             VStack(alignment: .leading, spacing: 6) {
                 Text("When off, quitting asks whether to quit or minimize instead. Minimizing closes the window and keeps Everywhere in the menu bar, still updating the index.")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .multilineTextAlignment(.leading)
+        }
+    }
+
+    private var openingSection: some View {
+        Section {
+            Toggle("Ask before opening files", isOn: $preferences.confirmBeforeOpening)
+        } header: {
+            Text("Opening Files")
+        } footer: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Double-clicking a result, pressing Return, or choosing Open in the context menu asks for confirmation before files launch. Turn off to open immediately. Choosing Don’t Ask Again in the dialog also turns this off.")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .multilineTextAlignment(.leading)

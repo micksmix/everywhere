@@ -53,6 +53,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         }
     }
     @Published private(set) var searchError: String?
+    @Published private(set) var showsSearchIndicator = false
     @Published private(set) var sortKey: SortKey = .name
     @Published private(set) var sortAscending = true
     @Published var focusToken = 0
@@ -63,6 +64,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     private var searchTask: Task<Void, Never>?
     private var searchCancellation = SearchCancellation()
     private var searchGeneration: UInt64 = 0
+    private var indicatorTask: Task<Void, Never>?
     private var warmTask: Task<Void, Never>?
     private var warmCancellation = SearchCancellation()
     private var resultSnapshot: Int64?
@@ -103,6 +105,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         searchCancellation.cancel()
         warmTask?.cancel()
         warmCancellation.cancel()
+        indicatorTask?.cancel()
     }
 
     var sortDescriptors: [NSSortDescriptor] {
@@ -174,6 +177,9 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
 
     private func finishSearch() {
         searchInFlight = false
+        indicatorTask?.cancel()
+        indicatorTask = nil
+        if showsSearchIndicator { showsSearchIndicator = false }
         if pendingIndexRefresh {
             scheduleSearch()
         } else {
@@ -208,6 +214,13 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         pendingIndexRefresh = false
         searchTask?.cancel()
         searchCancellation.cancel()
+        indicatorTask?.cancel()
+        showsSearchIndicator = false
+        indicatorTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            self?.showsSearchIndicator = true
+        }
         let cancellation = SearchCancellation()
         searchCancellation = cancellation
         searchGeneration &+= 1
@@ -274,9 +287,41 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
 
     func openSelection() {
         rememberSearch()
-        for entry in selectedEntries.prefix(10) {
-            Self.open(entry)
+        confirmAndOpen(selectedEntries)
+    }
+
+    func confirmAndOpen(_ entries: [Entry]) {
+        let targets = Array(entries.prefix(10))
+        guard !targets.isEmpty else { return }
+        guard AppPreferences.shared.confirmBeforeOpening, let window = hostWindow else {
+            for entry in targets { Self.open(entry) }
+            return
         }
+        let alert = NSAlert()
+        if targets.count == 1 {
+            alert.messageText = "Open “\(targets[0].name)”?"
+            alert.informativeText = targets[0].path
+        } else {
+            let suffix = entries.count > targets.count ? " of \(entries.count) selected" : ""
+            alert.messageText = "Open \(targets.count) items\(suffix)?"
+            alert.informativeText = targets.prefix(5).map(\.path).joined(separator: "\n")
+        }
+        alert.addButton(withTitle: "Open")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .informational
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don’t Ask Again"
+        alert.beginSheetModal(for: window) { response in
+            if alert.suppressionButton?.state == .on {
+                AppPreferences.shared.confirmBeforeOpening = false
+            }
+            guard response == .alertFirstButtonReturn else { return }
+            for entry in targets { Self.open(entry) }
+        }
+    }
+
+    private var hostWindow: NSWindow? {
+        NSApp.mainWindow ?? NSApp.keyWindow ?? NSApp.windows.first { $0.isVisible && $0.level == .normal }
     }
 
     static func open(_ entry: Entry) {

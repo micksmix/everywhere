@@ -155,33 +155,81 @@ final class FilenameIndex {
         }
         let ordering = Ordering(key: request.sortKey, ascending: request.ascending)
         let alreadySorted = reuse && previousRequest?.sortKey == request.sortKey && previousRequest?.ascending == request.ascending
-        if !alreadySorted {
-            if sortOrders[ordering] == nil && matches.count >= max(1024, (rows.count - deadRows) / 4) {
-                try prepareSort(key: request.sortKey, ascending: request.ascending, cancellation: cancellation)
-            }
-            if let order = sortOrders[ordering] {
-                recentOrders.removeAll { $0 == ordering }
-                recentOrders.append(ordering)
-                var flags = [UInt64](repeating: 0, count: (rows.count + 63) / 64)
-                for (offset, index) in matches.enumerated() {
-                    if offset % 1024 == 0 { try cancellation?.check() }
-                    flags[index / 64] |= UInt64(1) << (index % 64)
-                }
-                matches.removeAll(keepingCapacity: true)
-                for (offset, index) in order.enumerated() {
-                    if offset % 1024 == 0 { try cancellation?.check() }
-                    if flags[index / 64] & (UInt64(1) << (index % 64)) != 0 { matches.append(index) }
-                }
-            } else {
-                matches = try sortedIndices(matches, ordering: ordering, cancellation: cancellation)
-            }
-        }
+        matches = try applyingOrder(matches, ordering: ordering, alreadySorted: alreadySorted, cancellation: cancellation)
         try cancellation?.check()
         previousRequest = filteredGroup == nil ? request : nil
         previousTerms = filteredGroup == nil ? query.literalTerms : nil
         previousMatches = matches
         let page = matches.dropFirst(max(0, request.offset)).prefix(max(1, min(request.limit, 100_000)))
         return (page.map { (rows[$0], name(for: rows[$0])) }, matches.count)
+    }
+
+    func selectRegex(request: SearchRequest, cancellation: SearchCancellation?,
+                     literal: String?, matchesRegex: (String) -> Bool) throws -> (rows: [(Row, String)], total: Int) {
+        let literalBytes = literal?.utf8.map { foldASCII($0) }
+        var matches: [UInt32] = []
+        try names.withUnsafeBufferPointer { bytes in
+            for (offset, index) in idOrder.enumerated() {
+                if offset % 256 == 0 { try cancellation?.check() }
+                let row = rows[index]
+                guard request.includeHidden || bytes[row.nameOffset] != 46,
+                      request.kind != .files || !row.isDirectory,
+                      request.kind != .folders || row.isDirectory else { continue }
+                if let literalBytes, !containsLiteral(bytes, row, literalBytes) { continue }
+                let name = String(decoding: UnsafeBufferPointer(start: bytes.baseAddress!.advanced(by: row.nameOffset), count: Int(row.nameLength)), as: UTF8.self)
+                if matchesRegex(name) { matches.append(index) }
+            }
+        }
+        let ordering = Ordering(key: request.sortKey, ascending: request.ascending)
+        let ordered = try applyingOrder(matches, ordering: ordering, alreadySorted: false, cancellation: cancellation)
+        try cancellation?.check()
+        let page = ordered.dropFirst(max(0, request.offset)).prefix(max(1, min(request.limit, 100_000)))
+        return (page.map { (rows[$0], name(for: rows[$0])) }, ordered.count)
+    }
+
+    private func applyingOrder(_ matches: [UInt32], ordering: Ordering, alreadySorted: Bool, cancellation: SearchCancellation?) throws -> [UInt32] {
+        if alreadySorted { return matches }
+        if sortOrders[ordering] == nil && matches.count >= max(1024, (rows.count - deadRows) / 4) {
+            try prepareSort(key: ordering.key, ascending: ordering.ascending, cancellation: cancellation)
+        }
+        if let order = sortOrders[ordering] {
+            recentOrders.removeAll { $0 == ordering }
+            recentOrders.append(ordering)
+            var flags = [UInt64](repeating: 0, count: (rows.count + 63) / 64)
+            for (offset, index) in matches.enumerated() {
+                if offset % 1024 == 0 { try cancellation?.check() }
+                flags[index / 64] |= UInt64(1) << (index % 64)
+            }
+            var ordered: [UInt32] = []
+            ordered.reserveCapacity(matches.count)
+            for (offset, index) in order.enumerated() {
+                if offset % 1024 == 0 { try cancellation?.check() }
+                if flags[index / 64] & (UInt64(1) << (index % 64)) != 0 { ordered.append(index) }
+            }
+            return ordered
+        }
+        return try sortedIndices(matches, ordering: ordering, cancellation: cancellation)
+    }
+
+    private func foldASCII(_ byte: UInt8) -> UInt8 {
+        byte >= 65 && byte <= 90 ? byte + 32 : byte
+    }
+
+    private func containsLiteral(_ bytes: UnsafeBufferPointer<UInt8>, _ row: Row, _ literal: [UInt8]) -> Bool {
+        let start = row.nameOffset
+        let end = row.nameOffset + Int(row.nameLength)
+        guard literal.count <= Int(row.nameLength) else { return false }
+        var offset = start
+        while offset + literal.count <= end {
+            var matched = true
+            for (step, byte) in literal.enumerated() where foldASCII(bytes[offset + step]) != byte {
+                matched = false
+                break
+            }
+            if matched { return true }
+            offset += 1
+        }
+        return false
     }
 
     func apply(changedIDs: Set<Int64>, replacements: [Int64: IndexRow], cancellation: SearchCancellation?) throws {

@@ -110,7 +110,9 @@ Run only one copy when testing the global shortcut.
 2. If the index is empty and protected file access is denied, a separate **Allow Full Disk Access** dialog appears before indexing. Use **Open Full Disk Access Settings**, enable Everywhere, then quit and reopen it. **Check Again** retries the check; **Continue with Limited Access** proceeds with accessible files.
 3. Choose **Rebuild Index** after changing locations or exclusions. Let any current operation finish first.
 4. Type a filename fragment. Try `report`, or `ext:pdf` for PDF files. Click **?** beside the search controls for syntax examples.
-5. Select a result and press **⌘O**, or double-click it, to open it.
+5. Select a result and press **⌘O**, or double-click it, to open it. Opening asks for
+   confirmation first; check **Don't Ask Again** in the dialog, or change
+   **Settings → General → Ask before opening files**, to open without asking.
 
 Full Disk Access gives more complete results and fewer permission prompts. The same settings button is available in **Settings → File Access**. Enable Everywhere (use **+** to add it from Applications if needed), then quit and reopen the app. If already scanned, choose **Reindex Accessible Files** there. Everywhere indexes filenames and metadata, not file contents. See the
 [user guide](docs/USER_GUIDE.md) for setup, search examples, and troubleshooting.
@@ -241,12 +243,12 @@ You can still use **Choose Application…** to browse manually.
 
 **Settings → Search Performance** includes **Keep filename index in memory**,
 enabled by default. It caches packed names and metadata for substring, wildcard, OR, and
-negated filename searches;
+negated filename searches, and for regular-expression searches that match names only;
 turn it off to use less active memory and query SQLite directly, which can be slower.
 The cache and selected sort order warm in the background while indexing is idle, and
 small index changes apply incrementally. Filename queries with metadata filters, such as
 `type:image vacation`, also use the cache when there are no OR groups or folder/path
-conditions. Other filtered queries, folder scopes, regex, and path queries use SQLite-backed engines. Folder scopes traverse parent links
+conditions. Other filtered queries, folder scopes, and path queries use SQLite-backed engines. Folder scopes traverse parent links
 before filename matching. Full paths are not retained in the memory cache.
 
 Searches start immediately as you type. The first 200 results appear before more rows
