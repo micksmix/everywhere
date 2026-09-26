@@ -68,6 +68,40 @@ final class IndexServiceTests: XCTestCase {
         XCTAssertEqual(try database.count(), 0)
     }
 
+    @MainActor
+    func testStartIndexingNowSkipsRunningAndFrozenCountdowns() async throws {
+        for frozen in [false, true] {
+            let suite = "EverywhereTests.\(UUID())"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("everywhere-start-now-\(UUID())", isDirectory: true)
+            defaults.set(directory.appendingPathComponent("index.sqlite").path, forKey: "IndexDatabasePath")
+            defer {
+                defaults.removePersistentDomain(forName: suite)
+                try? FileManager.default.removeItem(at: directory)
+            }
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let settings = IndexSettings(defaults: defaults)
+            settings.liveUpdates = false
+            settings.roots = [directory.path]
+            let database = try Database(path: settings.indexPath)
+            try TestTree(db: database).add(path: "/notes/todo.txt")
+            let service = IndexService(settings: settings, database: database)
+            defer { service.setIndexingEnabled(false) }
+            service.startIfNeeded()
+            XCTAssertEqual(service.phase, .waiting)
+            XCTAssertGreaterThan(service.countdownSeconds, 0)
+            if frozen { service.togglePause() }
+            let finished = expectation(description: "Catch-up finishes")
+            let subscription = service.$phase.dropFirst().filter { $0 == .idle }.prefix(1).sink { _ in finished.fulfill() }
+            service.startIndexingNow()
+            await fulfillment(of: [finished], timeout: 10)
+            withExtendedLifetime(subscription) {}
+            XCTAssertFalse(service.isPaused)
+            XCTAssertEqual(service.phase, .idle)
+        }
+    }
+
     func testExclusionSettingsPersist() throws {
         let suite = "EverywhereTests.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

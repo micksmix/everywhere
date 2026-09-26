@@ -244,6 +244,14 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         if paused && phase == .waiting { togglePause() }
     }
 
+    /// Leave the startup countdown and begin the catch-up immediately,
+    /// whether the countdown is running or frozen.
+    public func startIndexingNow() {
+        guard phase == .waiting else { return }
+        isPaused = false
+        beginCatchUp()
+    }
+
     private func scheduleStartup() {
         cancelCountdown()
         guard launchAccessState == .ready, settings.indexingEnabled, !settings.needsLocationSetup else { return }

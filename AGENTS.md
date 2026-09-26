@@ -259,7 +259,9 @@ and re-measure both size and speed.
   and a Settings scene. Search modifiers are always-visible button toggles beside
   the search field and share the model bindings used by the Search menu.
 - Indexing activity is a compact status-bar spinner with item count and Pause/Resume;
-  a paused state uses a static pause icon. Do not invent a percent-complete value for
+  a paused state uses a static pause icon. During the startup countdown the button reads
+  Resume and starts indexing immediately; the Search menu's Pause Indexing holds the
+  countdown. Do not invent a percent-complete value for
   a filesystem walk whose total is unknown.
 - Keep one standard AppKit help button inside the main content search row, not the
   toolbar/status bar. Tips use a transient native popover with accessible labels and

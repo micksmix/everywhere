@@ -21,17 +21,19 @@ struct IndexingProgressView: View {
     }
 
     private var details: String {
-        if indexService.phase == .waiting { return "Search the saved index while indexing waits. Pause holds indexing; Resume starts it immediately." }
+        if indexService.phase == .waiting { return "Search the saved index while indexing waits. Resume starts indexing immediately; Pause Indexing in the Search menu holds the countdown." }
         let stats = indexService.progressStats
         return "\(stats.scannedItems.formatted()) items scanned · \(stats.scannedDirectories.formatted()) folders checked · \(stats.skipped.formatted()) skipped"
     }
+
+    private var waiting: Bool { indexService.phase == .waiting }
 
     var body: some View {
         HStack(spacing: 6) {
             if indexService.isPaused {
                 Image(systemName: "pause.circle")
                     .foregroundStyle(.secondary)
-            } else if indexService.phase == .waiting {
+            } else if waiting {
                 Image(systemName: "clock").foregroundStyle(.secondary)
             } else {
                 ProgressView()
@@ -40,23 +42,32 @@ struct IndexingProgressView: View {
             }
             Text(title)
                 .foregroundStyle(.secondary)
-            if indexService.phase != .waiting {
+            if !waiting {
                 Text(indexService.progressStats.scannedItems.formatted())
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("\(indexService.progressStats.scannedItems.formatted()) items scanned")
             }
-            Button(indexService.isPaused ? "Resume" : "Pause") {
-                indexService.togglePause()
+            Button(waiting || indexService.isPaused ? "Resume" : "Pause") {
+                if waiting {
+                    indexService.startIndexingNow()
+                } else {
+                    indexService.togglePause()
+                }
             }
             .disabled(!indexService.canPause)
-            .help(indexService.canPause
-                  ? "Pause or resume the countdown or current scan while Everywhere stays open."
-                  : "Finishing the search index; this step cannot be paused.")
+            .help(helpText)
         }
         .font(.footnote)
         .controlSize(.small)
         .fixedSize()
         .help(details)
+    }
+
+    private var helpText: String {
+        if waiting { return "Start indexing now, skipping the rest of the countdown." }
+        return indexService.canPause
+              ? "Pause or resume the current scan while Everywhere stays open."
+              : "Finishing the search index; this step cannot be paused."
     }
 }

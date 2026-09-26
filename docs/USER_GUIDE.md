@@ -315,8 +315,9 @@ Files appear automatically as indexing progresses, even with the search field em
 You can search immediately; results refresh as more files become available.
 
 When a saved index contains entries, the status bar shows **Indexing in 0:02:00** by default. Search the saved index
-while you wait. **Pause** freezes the remaining time; the same button becomes **Resume**
-and starts indexing immediately, skipping the remaining delay. Closing and reopening the window does not restart the timer.
+while you wait. The button beside it reads **Resume** and starts indexing immediately, skipping the remaining delay.
+To hold the countdown instead, choose **Pause Indexing** in the Search menu; the title then shows the frozen remaining
+time as paused, and **Resume** starts indexing. Closing and reopening the window does not restart the timer.
 Quitting and relaunching starts a new countdown.
 
 In **Settings → Indexing**, enter a startup delay and choose **Seconds**, **Minutes**, or

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.0
+
+- During the startup countdown, the status-bar button now reads Resume and starts indexing immediately, skipping the remaining delay. Hold the countdown with Pause Indexing in the Search menu; Pause/Resume still pause and resume an active scan.
+
+## 1.5.0
+
+- Explain the macOS permission prompts: the one-time Desktop, Documents, Downloads, Photos, and removable/network volume prompts now carry Everywhere's explanation that it reads file names and metadata only, never file contents.
+- Show a notice when a scan finishes with items macOS kept unreadable while Full Disk Access is denied: the skipped count plus an Open Full Disk Access Settings button. Dismissing it hides the notice for the session.
+- Clarify Full Disk Access guidance in the setup dialog, Settings → File Access, and the user guide: which prompts to expect without it, that a grant belongs to the terminal when Everywhere is started from one, and how to re-answer a past Don't Allow with `tccutil`.
+
 ## 1.4.0
 
 - Speed up regex searches by matching names in the packed filename cache with the same literal prefilter and regex semantics as the SQLite path; name-only regexes now reuse cached sort orders, so sorting regex results is fast.
