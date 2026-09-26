@@ -114,7 +114,7 @@ Run only one copy when testing the global shortcut.
    confirmation first; check **Don't Ask Again** in the dialog, or change
    **Settings → General → Ask before opening files**, to open without asking.
 
-Full Disk Access gives more complete results and fewer permission prompts. The same settings button is available in **Settings → File Access**. Enable Everywhere (use **+** to add it from Applications if needed), then quit and reopen the app. If already scanned, choose **Reindex Accessible Files** there. Everywhere indexes filenames and metadata, not file contents. See the
+Full Disk Access gives more complete results and removes the one-time macOS prompts for Desktop, Documents, Downloads, Photos, and other apps' data. The same settings button is available in **Settings → File Access**. Enable Everywhere (use **+** to add it from Applications if needed), then quit and reopen the app. If already scanned, choose **Reindex Accessible Files** there. Started from a terminal, it is the terminal that needs the access instead. Everywhere indexes filenames and metadata, not file contents. When a scan finishes with items macOS kept unreadable while access is denied, a notice below the results offers the settings button; dismissing it hides the notice for the session. See the
 [user guide](docs/USER_GUIDE.md) for setup, search examples, and troubleshooting.
 
 ### Filters, previews, and search history

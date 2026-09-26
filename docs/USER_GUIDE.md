@@ -274,9 +274,24 @@ Use **Open Full Disk Access Settings** in this dialog or in **Settings → File 
 **System Settings → Privacy & Security → Full Disk Access**. Enable Everywhere; if it is
 missing, click **+** and add Everywhere from Applications. Quit and reopen the app afterward.
 If you already scanned, choose **Reindex Accessible Files** in **Settings → File Access**
-when the current operation finishes. Without access, you can still search accessible files,
-but protected files may be missing and macOS may ask for folder access. Access remains
+when the current operation finishes. Started from a terminal, it is the terminal that needs
+the access instead. Without access, you can still search accessible files,
+but protected files may be missing. Access remains
 subject to macOS permissions, mounted volumes, and index exclusions.
+
+Without Full Disk Access, macOS asks once each for Desktop, Documents, Downloads, and
+Photos access, and once for **data from other apps** when the scan reads other
+applications' library containers. Each prompt appears once per decision; a past
+**Don't Allow** sticks and macOS will not ask again. To be asked again with Everywhere's
+explanation, quit Everywhere and reset the stale decision, for example
+`tccutil reset SystemPolicyDownloadsFolder app.everywhere.macos` (similarly for
+`SystemPolicyDesktopFolder`, `SystemPolicyDocumentsFolder`, and `Photos`). Full Disk
+Access removes all of these prompts, including the other-apps one, which has no
+explanation string.
+
+When a scan finishes with items macOS kept unreadable while access is still denied, a
+notice below the results shows the skipped count and offers **Open Full Disk Access
+Settings**. Dismissing it hides the notice for the rest of the session.
 
 macOS has no public Full Disk Access status API. Everywhere uses a read-only access probe
 without reading file contents. Missing probe files and ordinary filesystem permission
@@ -335,6 +350,11 @@ unavailable while indexing is disabled. The same control is available in
 **Settings… → Indexing → Live Updates → Watch the file system for changes**.
 Turn it on to keep the index up to date while Everywhere runs. Turn it off to stop ongoing monitoring after any current
 startup catch-up finishes. This setting is separate from pausing an active scan.
+
+Monitoring batches changes: while large builds or sync tools churn thousands of files,
+checks stretch from instant up to a few seconds apart, and a folder checked moments ago
+is not re-checked immediately. Results may lag a few seconds during that churn and settle
+once activity quiets down; ordinary edits still appear within about a second.
 
 At startup, Everywhere catches up on changes recorded while it was closed. A valid saved
 checkpoint lets it check changed directories instead of walking every file again.

@@ -138,6 +138,74 @@ final class ChangeHandlerTests: XCTestCase {
 
         XCTAssertEqual(try database.search(SearchRequest(text: "hidden")).total, 0)
     }
+
+    func testSustainedChurnStretchesDebounce() throws {
+        let handler = ChangeHandler(db: database, config: IndexConfig(roots: [root.path]),
+                                    debounce: 0.05, maxDebounce: 0.4)
+        defer { handler.stop() }
+        handler.ingest([root.path])
+        handler.flushPendingNow()
+        XCTAssertEqual(handler.effectiveDebounce, 0.05, accuracy: 0.0001)
+
+        handler.ingest([root.path])
+        XCTAssertEqual(handler.effectiveDebounce, 0.1, accuracy: 0.0001)
+        handler.flushPendingNow()
+        handler.ingest([root.path])
+        XCTAssertEqual(handler.effectiveDebounce, 0.2, accuracy: 0.0001)
+    }
+
+    func testQuietPeriodResetsDebounce() throws {
+        let handler = ChangeHandler(db: database, config: IndexConfig(roots: [root.path]),
+                                    debounce: 0.05, maxDebounce: 0.2)
+        defer { handler.stop() }
+        handler.ingest([root.path])
+        handler.flushPendingNow()
+        handler.ingest([root.path])
+        XCTAssertEqual(handler.effectiveDebounce, 0.1, accuracy: 0.0001)
+
+        Thread.sleep(forTimeInterval: 0.45)
+        handler.ingest([root.path])
+        XCTAssertEqual(handler.effectiveDebounce, 0.05, accuracy: 0.0001)
+    }
+
+    func testRecentlyReconciledPathIsDeferredNotLost() throws {
+        let handler = ChangeHandler(db: database, config: IndexConfig(roots: [root.path]),
+                                    debounce: 0.05, pathCooldown: 0.3)
+        defer { handler.stop() }
+        handler.ingest([root.path])
+        handler.flushPendingNow()
+
+        let file = root.appendingPathComponent("churn.txt")
+        try Data([1]).write(to: file)
+        handler.ingest([root.path])
+
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, ((try? database.search(SearchRequest(text: "churn")).total) ?? 0) == 0 {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertEqual(try database.search(SearchRequest(text: "churn")).total, 1)
+    }
+
+    func testRecursiveScanBypassesPathCooldown() throws {
+        let nested = root.appendingPathComponent("nested")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try FilesystemIndexer(db: database, config: IndexConfig(roots: [root.path])).run()
+        let handler = ChangeHandler(db: database, config: IndexConfig(roots: [root.path]),
+                                    debounce: 0.05, pathCooldown: 5)
+        defer { handler.stop() }
+        handler.ingest([root.path])
+        handler.flushPendingNow()
+
+        try Data([1]).write(to: nested.appendingPathComponent("deep.txt"))
+        handler.ingest(events: [FileSystemEvent(path: root.path, id: 43,
+                                                flags: UInt32(kFSEventStreamEventFlagMustScanSubDirs))])
+
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, ((try? database.search(SearchRequest(text: "deep")).total) ?? 0) == 0 {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertEqual(try database.search(SearchRequest(text: "deep")).total, 1)
+    }
 }
 
 final class FSEventsMonitorTests: XCTestCase {

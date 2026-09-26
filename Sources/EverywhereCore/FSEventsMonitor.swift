@@ -104,23 +104,34 @@ public final class FSEventsMonitor: @unchecked Sendable {
 }
 
 public final class ChangeHandler: @unchecked Sendable {
+    private struct PendingChange {
+        var recursive: Bool
+        var id: UInt64
+    }
+
     private let db: Database
     private let config: IndexConfig
     private let rootPaths: [(path: String, canonical: String)]
     private let debounce: TimeInterval
+    private let maxDebounce: TimeInterval
+    private let pathCooldown: TimeInterval
     private let control: IndexingControl
     private let onCommit: @Sendable (UInt64, Bool, IndexerStats) throws -> Void
     private let onError: @Sendable (Error) -> Void
     private let queue = DispatchQueue(label: "app.everywhere.changes", qos: .utility)
     private let queueKey = DispatchSpecificKey<Bool>()
-    private var pending: [String: Bool] = [:]
-    private var pendingID: UInt64 = 0
+    private var pending: [String: PendingChange] = [:]
+    private var historyDoneID: UInt64 = 0
     private var historyDone = false
     private var suspended: Bool
     private var stopped = false
     private var flushItem: DispatchWorkItem?
+    private var debounceInterval: TimeInterval
+    private var lastFlushEnd: Date?
+    private var lastReconciled: [String: Date] = [:]
 
     public init(db: Database, config: IndexConfig, debounce: TimeInterval = 0.5,
+                maxDebounce: TimeInterval = 8, pathCooldown: TimeInterval = 5,
                 suspended: Bool = false, control: IndexingControl = IndexingControl(),
                 onCommit: @escaping @Sendable (UInt64, Bool, IndexerStats) throws -> Void = { _, _, _ in },
                 onError: @escaping @Sendable (Error) -> Void = { _ in }) {
@@ -130,11 +141,18 @@ public final class ChangeHandler: @unchecked Sendable {
             (Self.normalizedPath($0), Walk.canonicalPath($0))
         }
         self.debounce = debounce
+        self.maxDebounce = max(maxDebounce, debounce)
+        self.pathCooldown = pathCooldown
         self.suspended = suspended
         self.control = control
         self.onCommit = onCommit
         self.onError = onError
+        debounceInterval = debounce
         queue.setSpecific(key: queueKey, value: true)
+    }
+
+    var effectiveDebounce: TimeInterval {
+        queue.sync { debounceInterval }
     }
 
     public func ingest(_ paths: [String]) {
@@ -148,23 +166,29 @@ public final class ChangeHandler: @unchecked Sendable {
             for event in events {
                 if event.isHistoryDone {
                     historyDone = true
-                    pendingID = max(pendingID, event.id)
+                    historyDoneID = max(historyDoneID, event.id)
                     accepted = true
                     continue
                 }
                 if event.requiresFullScan {
-                    for root in config.roots { pending[root] = true }
+                    for root in config.roots { mergePending(root, id: event.id, recursive: true) }
                     accepted = true
                 } else if let path = indexedPath(event.path), !config.ignores(path: path) {
-                    pending[path] = (pending[path] ?? false) || event.requiresRecursiveScan
+                    mergePending(path, id: event.id, recursive: event.requiresRecursiveScan)
                     accepted = true
                 } else {
                     continue
                 }
-                pendingID = max(pendingID, event.id)
             }
             if accepted && !suspended { scheduleFlush() }
         }
+    }
+
+    private func mergePending(_ path: String, id: UInt64, recursive: Bool) {
+        var change = pending[path] ?? PendingChange(recursive: false, id: 0)
+        change.recursive = change.recursive || recursive
+        change.id = max(change.id, id)
+        pending[path] = change
     }
 
     static func normalizedPath(_ path: String) -> String {
@@ -188,40 +212,72 @@ public final class ChangeHandler: @unchecked Sendable {
         return nil
     }
 
-    private func scheduleFlush() {
+    private func scheduleFlush(after delay: TimeInterval? = nil) {
         flushItem?.cancel()
+        let interval: TimeInterval
+        if let delay {
+            interval = delay
+        } else if let end = lastFlushEnd, end.timeIntervalSinceNow > -maxDebounce {
+            debounceInterval = min(debounceInterval * 2, maxDebounce)
+            interval = debounceInterval
+        } else {
+            debounceInterval = debounce
+            interval = debounce
+        }
         let item = DispatchWorkItem { [weak self] in self?.flush() }
         flushItem = item
-        queue.asyncAfter(deadline: .now() + debounce, execute: item)
+        queue.asyncAfter(deadline: .now() + interval, execute: item)
     }
 
     public func resume() {
         queue.async { [self] in
             guard !stopped else { return }
             suspended = false
-            flush()
+            flush(bypassCooldown: true)
         }
     }
 
     public func flushPendingNow() {
-        if DispatchQueue.getSpecific(key: queueKey) == true { flush() }
-        else { queue.sync { flush() } }
+        if DispatchQueue.getSpecific(key: queueKey) == true { flush(bypassCooldown: true) }
+        else { queue.sync { flush(bypassCooldown: true) } }
     }
 
-    private func flush() {
+    private func flush(bypassCooldown: Bool = false) {
         flushItem?.cancel()
         flushItem = nil
-        guard !suspended, !pending.isEmpty || historyDone else { return }
-        let paths = pending
-        let eventID = pendingID
+        guard !stopped, !suspended, !pending.isEmpty || historyDone else { return }
+        let now = Date()
+        if lastReconciled.count > 4096 {
+            lastReconciled = lastReconciled.filter { now.timeIntervalSince($0.value) < pathCooldown * 2 }
+        }
         let completedHistory = historyDone
-        pending = [:]
-        pendingID = 0
-        historyDone = false
+        let sentinelID = historyDoneID
+        let bypass = bypassCooldown || completedHistory
+        var immediate: [String: PendingChange] = [:]
+        var deferred: [String: PendingChange] = [:]
+        var earliestEligible: Date?
+        for (path, change) in pending {
+            let withinCooldown = lastReconciled[path].map { now.timeIntervalSince($0) < pathCooldown } ?? false
+            if !bypass && !change.recursive && withinCooldown {
+                deferred[path] = change
+                let eligibleAt = lastReconciled[path]!.addingTimeInterval(pathCooldown)
+                if earliestEligible.map({ eligibleAt < $0 }) ?? true { earliestEligible = eligibleAt }
+            } else {
+                immediate[path] = change
+            }
+        }
+        pending = deferred
+        let eventID: UInt64
+        if deferred.isEmpty {
+            eventID = max(immediate.values.map(\.id).max() ?? 0, completedHistory ? sentinelID : 0)
+        } else {
+            let floor = deferred.values.map(\.id).min() ?? 0
+            eventID = floor > 0 ? floor - 1 : 0
+        }
         do {
             var total = IndexerStats()
             for recursive in [false, true] {
-                let roots = paths.filter { $0.value == recursive }.map(\.key)
+                let roots = immediate.filter { $0.value.recursive == recursive }.map(\.key)
                 guard !roots.isEmpty else { continue }
                 let reconciler = Reconciler(db: db, config: config, roots: roots, skipUnchangedDirs: false, scanKnownSubdirectories: recursive)
                 try reconciler.run(isCancelled: { !self.control.waitUntilRunning() })
@@ -231,14 +287,32 @@ public final class ChangeHandler: @unchecked Sendable {
                 total.scannedDirectories += stats.scannedDirectories
                 total.skipped += stats.skipped
             }
+            lastFlushEnd = Date()
+            for path in immediate.keys { lastReconciled[path] = lastFlushEnd! }
             guard !control.isCancelled else { return }
+            historyDone = false
+            historyDoneID = 0
             try onCommit(eventID, completedHistory, total)
+            scheduleFollowUp(earliest: earliestEligible)
         } catch {
-            for (path, recursive) in paths { pending[path] = (pending[path] ?? false) || recursive }
-            pendingID = max(pendingID, eventID)
-            historyDone = historyDone || completedHistory
+            lastFlushEnd = Date()
+            for (path, change) in immediate {
+                var merged = pending[path] ?? change
+                merged.recursive = merged.recursive || change.recursive
+                merged.id = max(merged.id, change.id)
+                pending[path] = merged
+            }
             onError(error)
+            scheduleFlush(after: pathCooldown)
         }
+    }
+
+    private func scheduleFollowUp(earliest: Date?) {
+        guard !pending.isEmpty else { return }
+        let delay: TimeInterval
+        if let earliest { delay = max(0.05, earliest.timeIntervalSinceNow) }
+        else { delay = pathCooldown }
+        scheduleFlush(after: delay)
     }
 
     public func stop() {
@@ -247,6 +321,8 @@ public final class ChangeHandler: @unchecked Sendable {
             self.flushItem?.cancel()
             self.flushItem = nil
             self.pending = [:]
+            self.historyDone = false
+            self.historyDoneID = 0
             self.stopped = true
         }
     }

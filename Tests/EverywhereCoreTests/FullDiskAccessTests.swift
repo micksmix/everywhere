@@ -74,6 +74,59 @@ final class FullDiskAccessTests: XCTestCase {
     }
 
     @MainActor
+    func testPrivacyHintTracksSkipsOnlyWhileAccessIsDeniedAndStaysDismissed() async throws {
+        try await runPrivacyHintCase(status: .denied, expectHint: true)
+        try await runPrivacyHintCase(status: .accessible, expectHint: false)
+        try await runPrivacyHintCase(status: .unknown, expectHint: false)
+    }
+
+    @MainActor
+    private func runPrivacyHintCase(status: FullDiskAccessStatus, expectHint: Bool) async throws {
+        let fixture = try AccessFixture()
+        defer { fixture.cleanUp() }
+        let root = fixture.directory.appendingPathComponent("files")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data().write(to: root.appendingPathComponent("example.txt"))
+        let locked = root.appendingPathComponent("locked")
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: locked.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path) }
+        if FileManager.default.isReadableFile(atPath: locked.path) {
+            throw XCTSkip("The process can read directories regardless of their permissions")
+        }
+        fixture.settings.roots = [root.path]
+        fixture.settings.liveUpdates = false
+        let check = AccessProbe(status)
+        let service = IndexService(settings: fixture.settings, database: fixture.database, accessCheck: { check.check() })
+        defer { service.setIndexingEnabled(false) }
+        service.startIfNeeded()
+        if status == .denied {
+            let denied = expectation(description: "Access denied at launch")
+            let promptSubscription = service.$launchAccessState.filter { $0 == .needsAccess }.prefix(1).sink { _ in denied.fulfill() }
+            await fulfillment(of: [denied], timeout: 5)
+            withExtendedLifetime(promptSubscription) {}
+            service.continueWithLimitedAccess()
+        }
+        let finished = expectation(description: "Scan completes")
+        let scanSubscription = service.$phase.dropFirst().filter { $0 == .idle }.prefix(1).sink { _ in finished.fulfill() }
+        await fulfillment(of: [finished], timeout: 10)
+        withExtendedLifetime(scanSubscription) {}
+        XCTAssertGreaterThan(service.progressStats.skipped, 0)
+        XCTAssertEqual(service.showsPrivacyHint, expectHint)
+        XCTAssertEqual(check.calls, 2)
+        guard expectHint else { return }
+        service.dismissPrivacyHint()
+        XCTAssertFalse(service.showsPrivacyHint)
+        let rescan = expectation(description: "Rescan after dismissal completes")
+        let rescanSubscription = service.$phase.dropFirst().filter { $0 == .idle }.prefix(1).sink { _ in rescan.fulfill() }
+        service.rebuild()
+        await fulfillment(of: [rescan], timeout: 10)
+        withExtendedLifetime(rescanSubscription) {}
+        XCTAssertFalse(service.showsPrivacyHint)
+        XCTAssertEqual(check.calls, 2)
+    }
+
+    @MainActor
     func testLimitedAccessStartsIndexingAndDoesNotPromptAgainThisLaunch() async throws {
         let fixture = try AccessFixture()
         defer { fixture.cleanUp() }

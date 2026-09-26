@@ -159,8 +159,15 @@ and re-measure both size and speed.
 - Invalidate the checkpoint before a rebuild. Start monitoring before the baseline walk,
   suspend event application during that walk, then replay queued changes after it finishes.
   This covers changes made while the scan is in progress.
-- Advance a cursor only after its batch has been successfully reconciled. Preserve retry
-  work on errors. Ignore `HistoryDone` paths; the flag marks completion of replay.
+- Advance a cursor only after its batch has been successfully reconciled. With deferred
+  paths (below) the committed event ID is `min(unreconciled pending IDs) - 1`, never the
+  global max. Preserve retry work on errors. Ignore `HistoryDone` paths; the flag marks
+  completion of replay.
+- Live ingest batches under churn: `ChangeHandler` doubles its debounce (0.5 s → 8 s cap)
+  while events keep arriving within `maxDebounce` of the previous flush and resets after
+  a quiet period. A non-recursive path reconciled within `pathCooldown` is deferred to a
+  scheduled follow-up flush, not dropped; recursive/full-scan paths and explicit
+  `flushPendingNow` bypass the cooldown. Don't turn deferral into event loss.
 - Ordinary directory events reconcile that directory and discover new subtrees using
   `scanKnownSubdirectories: false`. Do not rely on directory modification times to prove
   an entire existing subtree is unchanged. SQLite currently stores whole-second mtimes.
@@ -209,7 +216,16 @@ and re-measure both size and speed.
   bindings set state but never re-render the menu.
 - **TCC**: full-disk walks hit permission prompts for protected dirs (Mail, Safari…).
   Grant Full Disk Access for a complete index. `opendir` failures are counted as
-  `skipped`, never fatal.
+  `skipped`, never fatal. FDA itself never prompts — it is granted in System Settings,
+  which the app links to; the usage-description strings in `Info.plist` label the
+  one-time Desktop/Documents/Downloads/volume prompts. The bundle identifier keys
+  every TCC grant: changing `app.everywhere.macos` silently revokes all of them.
+  When a scan finishes with skips while the access probe reports denied, surface
+  the privacy hint (`IndexService.noteScanFinished`); a dismissed hint stays
+  dismissed for the session. Folder prompts are one-time per decision: a stale
+  **Don't Allow** is only re-asked after `tccutil reset <service> app.everywhere.macos`.
+  The other-apps-data prompt (reading `~/Library/Containers`) has no Info.plist
+  string — only FDA removes it.
 - The app's own DB directory is excluded from filesystem walks and monitor ingestion, including checkpoint
   writes. Ignored-only event batches must not write checkpoints, or they create a
   feedback loop. Explicit roots inside a default skipped prefix override that prefix

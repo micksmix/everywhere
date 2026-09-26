@@ -2,6 +2,17 @@ import SwiftUI
 import AppKit
 import EverywhereCore
 
+private func openFullDiskAccessSettings() -> Bool {
+    let urls = [
+        "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles",
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+    ]
+    return urls.contains { address in
+        guard let url = URL(string: address) else { return false }
+        return NSWorkspace.shared.open(url)
+    }
+}
+
 struct FullDiskAccessView: View {
     @State private var couldNotOpen = false
 
@@ -9,16 +20,9 @@ struct FullDiskAccessView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Allow Full Disk Access for more complete search results and fewer permission prompts. Everywhere indexes filenames and metadata, including in protected folders; it doesn’t read file contents.")
             Button("Open Full Disk Access Settings") {
-                let urls = [
-                    "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles",
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
-                ]
-                couldNotOpen = !urls.contains { address in
-                    guard let url = URL(string: address) else { return false }
-                    return NSWorkspace.shared.open(url)
-                }
+                couldNotOpen = !openFullDiskAccessSettings()
             }
-            Text("In System Settings → Privacy & Security → Full Disk Access, enable Everywhere. If missing, use + to add Everywhere from Applications. Then quit and reopen Everywhere; if you already scanned, reindex in Settings → File Access.")
+            Text("Without it, macOS asks once each for Desktop, Documents, Downloads, Photos, and other apps’ data; Full Disk Access removes all of these prompts. In System Settings → Privacy & Security → Full Disk Access, enable Everywhere (use + to add Everywhere from Applications if missing), then quit and reopen Everywhere; if you already scanned, reindex in Settings → File Access. Started from a terminal, it is the terminal that needs the access instead.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if couldNotOpen {
@@ -27,6 +31,46 @@ struct FullDiskAccessView: View {
             }
         }
         .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+struct PrivacyHintView: View {
+    @EnvironmentObject var indexService: IndexService
+    @State private var couldNotOpen = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(.yellow)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Indexing skipped \(indexService.progressStats.skipped.formatted()) items that macOS kept unreadable.")
+                Text("Allow Full Disk Access in System Settings, then quit and reopen Everywhere and reindex in Settings → File Access. Started from a terminal, it is the terminal that needs the access instead.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if couldNotOpen {
+                    Text("Couldn’t open System Settings. Open it from the Apple menu and follow the path above.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+            Spacer()
+            Button("Open Full Disk Access Settings") {
+                couldNotOpen = !openFullDiskAccessSettings()
+            }
+            Button {
+                indexService.dismissPrivacyHint()
+            } label: {
+                Image(systemName: "xmark.circle")
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
+            .accessibilityLabel("Dismiss")
+        }
+        .font(.footnote)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.yellow.opacity(0.1))
     }
 }
 

@@ -216,7 +216,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         searchCancellation.cancel()
         indicatorTask?.cancel()
         showsSearchIndicator = false
-        indicatorTask = Task { [weak self] in
+        indicatorTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled else { return }
             self?.showsSearchIndicator = true

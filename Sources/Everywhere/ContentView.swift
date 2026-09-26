@@ -21,6 +21,10 @@ struct ContentView: View {
                         emptyState
                     }
                 }
+            if indexService.showsPrivacyHint {
+                Divider()
+                PrivacyHintView()
+            }
             statusBar
         }
         .sheet(isPresented: Binding(get: { needsLaunchModal }, set: { _ in })) {

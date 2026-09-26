@@ -30,6 +30,22 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<!-- Full Disk Access has no prompt: it is granted in System Settings,
+	     which the app links to. These cover the one-time folder prompts the
+	     first walk raises. Changing the bundle identifier invalidates every
+	     permission grant. -->
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Everywhere indexes the names of files in your Desktop folder so you can find them instantly. It reads names and metadata only, never file contents.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Everywhere indexes the names of files in your Documents folder so you can find them instantly. It reads names and metadata only, never file contents.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Everywhere indexes the names of files in your Downloads folder so you can find them instantly. It reads names and metadata only, never file contents.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Everywhere indexes the names of files on removable disks you include so you can find them instantly. It reads names and metadata only, never file contents.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>Everywhere indexes the names of files on network disks you include so you can find them instantly. It reads names and metadata only, never file contents.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Everywhere indexes the names of items in your Photos Library so you can find them instantly. It reads names and metadata only, never file contents.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026. Apache License 2.0.</string>
 	<key>CFBundleHelpBookFolder</key>

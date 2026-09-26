@@ -33,7 +33,9 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     @Published public private(set) var launchAccessState: LaunchAccessState
     @Published public private(set) var accessCheckMessage: String?
     @Published public private(set) var showsLaunchAccessPrompt = false
+    @Published public private(set) var showsPrivacyHint = false
     private let accessCheck: (@Sendable () -> FullDiskAccessStatus)?
+    private var privacyHintDismissed = false
 
     public let settings: IndexSettings
     public let database: Database
@@ -157,6 +159,21 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         launchAccessState = .ready
         accessCheckMessage = nil
         startIfNeeded()
+    }
+
+    public func dismissPrivacyHint() {
+        privacyHintDismissed = true
+        showsPrivacyHint = false
+    }
+
+    /// A walk finished in the idle phase. Skips plus a current denial is the
+    /// one combination where Full Disk Access explains what was missed; a
+    /// dismissed hint stays dismissed for the session.
+    private func noteScanFinished() {
+        guard !privacyHintDismissed, progressStats.skipped > 0, let accessCheck else { return }
+        if accessCheck() == .denied {
+            showsPrivacyHint = true
+        }
     }
 
     public func startIfNeeded() {
@@ -385,6 +402,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                         self.changeHandler?.resume()
                     } else {
                         self.phase = .idle
+                        self.noteScanFinished()
                         self.compactIndexIfNeeded()
                     }
                 }
@@ -443,6 +461,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                         self.phase = .idle
                         self.live = self.settings.liveUpdates
                         if !self.settings.liveUpdates { self.stopMonitor() }
+                        self.noteScanFinished()
                         self.compactIndexIfNeeded()
                     }
                 }
