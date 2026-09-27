@@ -34,8 +34,12 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     @Published public private(set) var accessCheckMessage: String?
     @Published public private(set) var showsLaunchAccessPrompt = false
     @Published public private(set) var showsPrivacyHint = false
+    @Published public private(set) var showsRebuildSuggestion = false
     private let accessCheck: (@Sendable () -> FullDiskAccessStatus)?
     private var privacyHintDismissed = false
+    private var rebuildSuggestionDismissed = false
+
+    public static let rebuildRecommendationInterval: TimeInterval = 30 * 24 * 3600
 
     public let settings: IndexSettings
     public let database: Database
@@ -166,6 +170,19 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         showsPrivacyHint = false
     }
 
+    public func dismissRebuildSuggestion() {
+        rebuildSuggestionDismissed = true
+        showsRebuildSuggestion = false
+    }
+
+    func updateRebuildSuggestion(now: Date = Date()) {
+        guard !rebuildSuggestionDismissed else { return }
+        guard started, settings.indexingEnabled, phase == .idle else { return }
+        let overdue = settings.lastFullRebuildDate
+            .map { now.timeIntervalSince($0) >= Self.rebuildRecommendationInterval } ?? true
+        showsRebuildSuggestion = overdue && indexedRows > 0
+    }
+
     /// A walk finished in the idle phase. Skips plus a current denial is the
     /// one combination where Full Disk Access explains what was missed; a
     /// dismissed hint stays dismissed for the session.
@@ -200,6 +217,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         }
         let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
             self?.compactIndexIfNeeded()
+            self?.updateRebuildSuggestion()
         }
         maintenanceTimer = timer
         RunLoop.main.add(timer, forMode: .common)
@@ -403,6 +421,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                     self.indexedRows = count
                     self.indexRevision += 1
                     self.isPaused = false
+                    if rebuild { self.settings.noteFullRebuild() }
                     if monitoring {
                         do { try checkpoint.save(databasePath: db.path) }
                         catch { self.lastError = String(describing: error) }
@@ -413,6 +432,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                         self.noteScanFinished()
                         self.compactIndexIfNeeded()
                     }
+                    self.updateRebuildSuggestion()
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
@@ -471,6 +491,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                         if !self.settings.liveUpdates { self.stopMonitor() }
                         self.noteScanFinished()
                         self.compactIndexIfNeeded()
+                        self.updateRebuildSuggestion()
                     }
                 }
             }, onError: { [weak self] error in

@@ -83,6 +83,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         self.database = database
         self.indexService = indexService
         scheduleSearch()
+        prepareMemorySearch()
         memorySubscription = AppPreferences.shared.$keepSearchIndexInMemory
             .dropFirst()
             .receive(on: DispatchQueue.main)
@@ -194,9 +195,13 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     }
 
     private func prepareMemorySearch() {
-        guard AppPreferences.shared.keepSearchIndexInMemory, indexService.phase == .idle else { return }
-        warmTask?.cancel()
-        warmCancellation.cancel()
+        guard AppPreferences.shared.keepSearchIndexInMemory else { return }
+        if database.isMemoryIndexLoaded {
+            warmTask?.cancel()
+            warmCancellation.cancel()
+        } else if warmTask != nil {
+            return
+        }
         let cancellation = SearchCancellation()
         warmCancellation = cancellation
         let db = database
@@ -208,8 +213,11 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     }
 
     private func scheduleSearch(offset: Int = 0) {
-        warmTask?.cancel()
-        warmCancellation.cancel()
+        let useMemory = AppPreferences.shared.keepSearchIndexInMemory
+        if !useMemory {
+            warmTask?.cancel()
+            warmCancellation.cancel()
+        }
         searchInFlight = true
         pendingIndexRefresh = false
         searchTask?.cancel()
@@ -225,7 +233,6 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         searchCancellation = cancellation
         searchGeneration &+= 1
         let generation = searchGeneration
-        let useMemory = AppPreferences.shared.keepSearchIndexInMemory
         var request = currentRequest()
         request.offset = offset
         let started = CFAbsoluteTimeGetCurrent()

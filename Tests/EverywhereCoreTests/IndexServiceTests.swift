@@ -157,6 +157,84 @@ final class IndexServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testStaleBuiltInExclusionsGainNewDefaultsOnce() throws {
+        let suite = "EverywhereTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("everywhere-builtin-migration-\(UUID())")
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        defaults.set(["/dev", "/.Spotlight-V100", "/.DocumentRevisions-V100", "/.Trashes", "/.fseventsd"],
+                     forKey: "IndexBuiltInExcludedFolders")
+        defaults.set([".Spotlight-V100"], forKey: "IndexBuiltInExcludedDirectoryNames")
+        let settings = IndexSettings(defaults: defaults)
+        settings.roots = ["/"]
+        XCTAssertTrue(settings.builtInExcludedFolders.contains("/System/Volumes"))
+        XCTAssertTrue(settings.builtInExcludedFolders.contains("/private/tmp"))
+        XCTAssertTrue(settings.builtInExcludedFolders.contains("/private/var/folders"))
+        XCTAssertTrue(settings.builtInExcludedDirectoryNames.contains(".Trash"))
+        let db = try Database(path: directory.appendingPathComponent("index.sqlite").path)
+        let service = IndexService(settings: settings, database: db)
+        XCTAssertTrue(service.makeConfig().ignores(path: "/System/Volumes/Data/Users/example/notes.txt"))
+        XCTAssertTrue(service.makeConfig().ignores(path: "/private/tmp/scratch"))
+        settings.builtInExcludedFolders.removeAll { $0 == "/System/Volumes" }
+        let restored = IndexSettings(defaults: defaults)
+        XCTAssertFalse(restored.builtInExcludedFolders.contains("/System/Volumes"))
+        XCTAssertTrue(restored.builtInExcludedFolders.contains("/private/tmp"))
+    }
+
+    @MainActor
+    func testRebuildSuggestionFollowsRebuildAgeAndDismissal() async throws {
+        let suite = "EverywhereTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("everywhere-rebuild-hint-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data().write(to: root.appendingPathComponent("note.txt"))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        defaults.set(root.appendingPathComponent("index.sqlite").path, forKey: "IndexDatabasePath")
+        let settings = IndexSettings(defaults: defaults)
+        settings.liveUpdates = false
+        settings.startupDelay = 0
+        settings.startupDelayUnit = .seconds
+        settings.roots = [root.path]
+        let db = try Database(path: root.appendingPathComponent("storage/index.sqlite").path)
+        let rootID = try db.ensureRootRow(path: root.path)
+        try db.insert(rows: [IndexRow(id: db.allocateIDs(1), parent: rootID, name: "note.txt", isDir: false, size: 4, modified: 1)])
+        let service = IndexService(settings: settings, database: db)
+        defer { service.setIndexingEnabled(false) }
+
+        let startup = expectation(description: "Startup scan finishes")
+        let startupSubscription = service.$phase.dropFirst().filter { $0 == .idle }.prefix(1).sink { _ in startup.fulfill() }
+        service.startIfNeeded()
+        await fulfillment(of: [startup], timeout: 30)
+        withExtendedLifetime(startupSubscription) {}
+        XCTAssertNil(settings.lastFullRebuildDate)
+        service.updateRebuildSuggestion()
+        XCTAssertTrue(service.showsRebuildSuggestion)
+
+        let finished = expectation(description: "Rebuild finishes")
+        let subscription = service.$phase.dropFirst().filter { $0 == .idle }.prefix(1).sink { _ in finished.fulfill() }
+        service.rebuild()
+        await fulfillment(of: [finished], timeout: 30)
+        withExtendedLifetime(subscription) {}
+        XCTAssertNotNil(settings.lastFullRebuildDate)
+        XCTAssertFalse(service.showsRebuildSuggestion)
+
+        settings.noteFullRebuild(Date().addingTimeInterval(-IndexService.rebuildRecommendationInterval - 3600))
+        service.updateRebuildSuggestion()
+        XCTAssertTrue(service.showsRebuildSuggestion)
+
+        service.dismissRebuildSuggestion()
+        XCTAssertFalse(service.showsRebuildSuggestion)
+        service.updateRebuildSuggestion()
+        XCTAssertFalse(service.showsRebuildSuggestion)
+    }
+
+    @MainActor
     func testRemovedBuiltInNameExclusionAppliesToRebuildAndEvents() throws {
         let suite = "EverywhereTests.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

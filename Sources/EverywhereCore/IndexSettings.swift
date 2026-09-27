@@ -5,6 +5,26 @@ public final class IndexSettings: ObservableObject {
     private static let rootsKey = "IndexRoots"
     private static let exclusionsKey = "IndexExclusions"
     private static let liveKey = "IndexLiveUpdates"
+    private static let builtInFoldersKey = "IndexBuiltInExcludedFolders"
+    private static let builtInDirNamesKey = "IndexBuiltInExcludedDirectoryNames"
+    private static let builtInVersionKey = "IndexBuiltInExcludedFoldersVersion"
+    private static let builtInDefaultsVersion = 2
+
+    private static func loadBuiltInExclusions(defaults: UserDefaults) -> (folders: [String], dirNames: [String]) {
+        let storedFolders = defaults.stringArray(forKey: builtInFoldersKey)
+        let storedDirNames = defaults.stringArray(forKey: builtInDirNamesKey)
+        let storedVersion = defaults.object(forKey: builtInVersionKey) == nil ? 0 : defaults.integer(forKey: builtInVersionKey)
+        var folders = storedFolders ?? FilesystemIndexer.defaultSkipPathPrefixes
+        var dirNames = storedDirNames ?? FilesystemIndexer.defaultSkipDirNames
+        if storedVersion < builtInDefaultsVersion {
+            for prefix in FilesystemIndexer.defaultSkipPathPrefixes where !folders.contains(prefix) { folders.append(prefix) }
+            for name in FilesystemIndexer.defaultSkipDirNames where !dirNames.contains(name) { dirNames.append(name) }
+            defaults.set(folders, forKey: builtInFoldersKey)
+            defaults.set(dirNames, forKey: builtInDirNamesKey)
+            defaults.set(builtInDefaultsVersion, forKey: builtInVersionKey)
+        }
+        return (folders, dirNames)
+    }
 
     @Published public private(set) var indexPath: String
 
@@ -84,6 +104,15 @@ public final class IndexSettings: ObservableObject {
         didSet { defaults.set(liveUpdates, forKey: Self.liveKey) }
     }
 
+    private static let lastRebuildKey = "LastFullRebuildDate"
+
+    @Published public private(set) var lastFullRebuildDate: Date?
+
+    public func noteFullRebuild(_ date: Date = Date()) {
+        lastFullRebuildDate = date
+        defaults.set(date.timeIntervalSince1970, forKey: Self.lastRebuildKey)
+    }
+
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let initialIndexPath = defaults.string(forKey: "IndexDatabasePath") ?? Database.defaultPath()
@@ -101,8 +130,12 @@ public final class IndexSettings: ObservableObject {
             defaults.set(["/"], forKey: Self.rootsKey)
         }
         exclusions = defaults.stringArray(forKey: Self.exclusionsKey) ?? []
-        builtInExcludedFolders = defaults.stringArray(forKey: "IndexBuiltInExcludedFolders") ?? FilesystemIndexer.defaultSkipPathPrefixes
-        builtInExcludedDirectoryNames = defaults.stringArray(forKey: "IndexBuiltInExcludedDirectoryNames") ?? FilesystemIndexer.defaultSkipDirNames
+        if defaults.object(forKey: Self.lastRebuildKey) != nil {
+            lastFullRebuildDate = Date(timeIntervalSince1970: defaults.double(forKey: Self.lastRebuildKey))
+        }
+        let builtIn = Self.loadBuiltInExclusions(defaults: defaults)
+        builtInExcludedFolders = builtIn.folders
+        builtInExcludedDirectoryNames = builtIn.dirNames
         excludedFolders = defaults.stringArray(forKey: "IndexExcludedFolders") ?? []
         excludedNamePatterns = defaults.stringArray(forKey: "IndexExcludedNamePatterns") ?? []
         if defaults.object(forKey: Self.liveKey) == nil {

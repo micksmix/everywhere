@@ -74,6 +74,47 @@ struct PrivacyHintView: View {
     }
 }
 
+struct RebuildSuggestionView: View {
+    @EnvironmentObject var indexService: IndexService
+
+    private var ageText: String {
+        if let date = indexService.settings.lastFullRebuildDate {
+            return "This index was last fully rebuilt \(Text(date, style: .date).fontWeight(.medium))."
+        }
+        return "This index has never been fully rebuilt."
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .foregroundStyle(.blue)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(ageText) Rebuilding it now is recommended.")
+                Text("Live updates keep results current, but a periodic rebuild clears dead entries and silent drift. Rebuilding takes a few minutes; you can keep searching meanwhile.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Rebuild Index") {
+                indexService.rebuild()
+            }
+            Button {
+                indexService.dismissRebuildSuggestion()
+            } label: {
+                Image(systemName: "xmark.circle")
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
+            .accessibilityLabel("Dismiss")
+        }
+        .font(.footnote)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.blue.opacity(0.1))
+    }
+}
+
 struct IndexSetupView: View {
     @EnvironmentObject var settings: IndexSettings
     @State private var scope = "home"

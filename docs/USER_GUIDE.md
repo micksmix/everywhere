@@ -293,6 +293,13 @@ When a scan finishes with items macOS kept unreadable while access is still deni
 notice below the results shows the skipped count and offers **Open Full Disk Access
 Settings**. Dismissing it hides the notice for the rest of the session.
 
+Live updates and periodic reconciliations keep the index current, so a manual rebuild is
+rarely needed. To clear accumulated drift, Everywhere recommends a full rebuild once the
+last one is more than 30 days old: a notice below the results offers **Rebuild Index**,
+which also resets the recommendation. Dismissing the notice hides it for the session;
+**Rebuild Index** in Settings → File Access, the Search menu, or the status-bar menu has
+the same effect.
+
 macOS has no public Full Disk Access status API. Everywhere uses a read-only access probe
 without reading file contents. Missing probe files and ordinary filesystem permission
 errors are inconclusive and do not trigger the launch dialog. You can always open the

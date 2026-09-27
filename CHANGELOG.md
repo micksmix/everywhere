@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.0
+
+- Make the first filename search after launch fast: the packed filename cache now loads in the background starting when the app opens, and typing no longer cancels that load, so the first query waits for the remaining load instead of restarting it.
+- Add missing built-in exclusions to exclusion lists saved by earlier versions, once per defaults update. Indexes that followed the firmlinked `/System/Volumes/Data` path are pruned at the next reconciliation, so files no longer appear twice under `/…` and `/System/Volumes/Data/…`.
+- Recommend a full index rebuild in a notice below the results once the last rebuild is more than 30 days old, with a Rebuild Index button and a dismiss control; manual rebuilds reset the recommendation.
+
 ## 1.6.0
 
 - During the startup countdown, the status-bar button now reads Resume and starts indexing immediately, skipping the remaining delay. Hold the countdown with Pause Indexing in the Search menu; Pause/Resume still pause and resume an active scan.

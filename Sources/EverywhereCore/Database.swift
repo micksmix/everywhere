@@ -629,6 +629,12 @@ public final class Database: @unchecked Sendable {
         return Int(sqlite3_column_int64(prepared, 0))
     }
 
+    public var isMemoryIndexLoaded: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return memoryRows != nil
+    }
+
     public func search(_ request: SearchRequest, useMemory: Bool = false,
                        cancellation: SearchCancellation = SearchCancellation()) throws -> SearchResult {
         try performSearch(request, useMemory: useMemory, cancellation: cancellation, preparing: false)

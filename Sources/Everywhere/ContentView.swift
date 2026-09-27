@@ -25,6 +25,10 @@ struct ContentView: View {
                 Divider()
                 PrivacyHintView()
             }
+            if indexService.showsRebuildSuggestion {
+                Divider()
+                RebuildSuggestionView()
+            }
             statusBar
         }
         .sheet(isPresented: Binding(get: { needsLaunchModal }, set: { _ in })) {

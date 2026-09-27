@@ -246,6 +246,13 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(refreshed.total, 1299)
     }
 
+    func testMemoryIndexLoadStateTracksCache() throws {
+        try tree.add(path: "/memo.txt")
+        XCTAssertFalse(db.isMemoryIndexLoaded)
+        _ = try db.search(SearchRequest(text: "memo"), useMemory: true)
+        XCTAssertTrue(db.isMemoryIndexLoaded)
+    }
+
     func testConcurrentWritesAndMemoryRefreshEndWithCurrentResults() throws {
         try tree.add(path: "/initial.txt")
         _ = try db.search(SearchRequest(text: ".txt"), useMemory: true)
