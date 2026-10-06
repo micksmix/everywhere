@@ -106,6 +106,7 @@ public final class FSEventsMonitor: @unchecked Sendable {
 public final class ChangeHandler: @unchecked Sendable {
     private struct PendingChange {
         var recursive: Bool
+        var firstID: UInt64
         var id: UInt64
     }
 
@@ -185,8 +186,9 @@ public final class ChangeHandler: @unchecked Sendable {
     }
 
     private func mergePending(_ path: String, id: UInt64, recursive: Bool) {
-        var change = pending[path] ?? PendingChange(recursive: false, id: 0)
+        var change = pending[path] ?? PendingChange(recursive: false, firstID: id, id: id)
         change.recursive = change.recursive || recursive
+        change.firstID = min(change.firstID, id)
         change.id = max(change.id, id)
         pending[path] = change
     }
@@ -271,7 +273,7 @@ public final class ChangeHandler: @unchecked Sendable {
         if deferred.isEmpty {
             eventID = max(immediate.values.map(\.id).max() ?? 0, completedHistory ? sentinelID : 0)
         } else {
-            let floor = deferred.values.map(\.id).min() ?? 0
+            let floor = deferred.values.map(\.firstID).min() ?? 0
             eventID = floor > 0 ? floor - 1 : 0
         }
         do {
@@ -290,15 +292,16 @@ public final class ChangeHandler: @unchecked Sendable {
             lastFlushEnd = Date()
             for path in immediate.keys { lastReconciled[path] = lastFlushEnd! }
             guard !control.isCancelled else { return }
+            try onCommit(eventID, completedHistory, total)
             historyDone = false
             historyDoneID = 0
-            try onCommit(eventID, completedHistory, total)
             scheduleFollowUp(earliest: earliestEligible)
         } catch {
             lastFlushEnd = Date()
             for (path, change) in immediate {
                 var merged = pending[path] ?? change
                 merged.recursive = merged.recursive || change.recursive
+                merged.firstID = min(merged.firstID, change.firstID)
                 merged.id = max(merged.id, change.id)
                 pending[path] = merged
             }

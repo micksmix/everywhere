@@ -8,6 +8,7 @@ struct NameQuery {
         let ascii: Bool
         let wildcard: Bool
         let regex: NSRegularExpression?
+        let skipTable: [UInt8]
 
         init(_ term: ParsedTerm, matchCase: Bool, wholeWord: Bool) {
             text = matchCase ? term.text : term.text.lowercased()
@@ -28,6 +29,15 @@ struct NameQuery {
                 pattern = "(?<![\\p{L}\\p{N}_])" + NSRegularExpression.escapedPattern(for: term.text) + "(?![\\p{L}\\p{N}_])"
             }
             regex = pattern.flatMap { try? NSRegularExpression(pattern: $0, options: matchCase ? [] : [.caseInsensitive]) }
+            if ascii && pattern == nil && bytes.count >= 4 {
+                var skips = [UInt8](repeating: UInt8(min(bytes.count, 255)), count: 128)
+                for index in 0..<(bytes.count - 1) {
+                    skips[Int(bytes[index])] = UInt8(min(bytes.count - index - 1, 255))
+                }
+                skipTable = skips
+            } else {
+                skipTable = []
+            }
         }
     }
 
@@ -77,7 +87,7 @@ struct NameQuery {
                 if term.wildcard && term.ascii && isASCII && !bytes.contains(where: { $0 >= 10 && $0 <= 13 }) {
                     matched = Self.glob(bytes, pattern: term.bytes, matchCase: matchCase)
                 } else if term.regex == nil && isASCII && term.ascii {
-                    matched = Self.contains(bytes, needle: term.bytes, matchCase: matchCase)
+                    matched = Self.contains(bytes, needle: term.bytes, skips: term.skipTable, matchCase: matchCase)
                 } else {
                     if decoded == nil { decoded = String(decoding: bytes, as: UTF8.self) }
                     let name = decoded!
@@ -125,9 +135,26 @@ struct NameQuery {
         return token == pattern.count
     }
 
-    private static func contains(_ bytes: UnsafeBufferPointer<UInt8>, needle: [UInt8], matchCase: Bool) -> Bool {
+    private static func contains(_ bytes: UnsafeBufferPointer<UInt8>, needle: [UInt8], skips: [UInt8], matchCase: Bool) -> Bool {
         guard !needle.isEmpty else { return true }
         guard needle.count <= bytes.count else { return false }
+        if !skips.isEmpty {
+            var end = needle.count - 1
+            while end < bytes.count {
+                let last = bytes[end]
+                let foldedLast = !matchCase && last >= 65 && last <= 90 ? last + 32 : last
+                var index = needle.count - 1
+                while index >= 0 {
+                    let byte = bytes[end - needle.count + 1 + index]
+                    let folded = !matchCase && byte >= 65 && byte <= 90 ? byte + 32 : byte
+                    if folded != needle[index] { break }
+                    index -= 1
+                }
+                if index < 0 { return true }
+                end += Int(skips[Int(foldedLast)])
+            }
+            return false
+        }
         for offset in 0...(bytes.count - needle.count) {
             var index = 0
             while index < needle.count {

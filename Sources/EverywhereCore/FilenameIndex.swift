@@ -188,13 +188,17 @@ final class FilenameIndex {
     }
 
     private func applyingOrder(_ matches: [UInt32], ordering: Ordering, alreadySorted: Bool, cancellation: SearchCancellation?) throws -> [UInt32] {
-        if alreadySorted { return matches }
+        if alreadySorted || matches.count < 2 { return matches }
+        if matches.count <= max(64, idOrder.count / 128) {
+            return try sortedIndices(matches, ordering: ordering, cancellation: cancellation)
+        }
         if sortOrders[ordering] == nil && matches.count >= max(1024, (rows.count - deadRows) / 4) {
             try prepareSort(key: ordering.key, ascending: ordering.ascending, cancellation: cancellation)
         }
         if let order = sortOrders[ordering] {
             recentOrders.removeAll { $0 == ordering }
             recentOrders.append(ordering)
+            if matches.count == idOrder.count { return order }
             var flags = [UInt64](repeating: 0, count: (rows.count + 63) / 64)
             for (offset, index) in matches.enumerated() {
                 if offset % 1024 == 0 { try cancellation?.check() }

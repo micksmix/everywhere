@@ -22,7 +22,63 @@ final class ChangeHandlerTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        handler.stop()
         try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    func testDeferredMergedEventsKeepEarliestUnreconciledCursor() throws {
+        let other = root.appendingPathComponent("other")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        let initial = expectation(description: "Initial reconciliation")
+        let deferred = expectation(description: "Cursor stays before earliest deferred event")
+        let handler = ChangeHandler(db: database, config: IndexConfig(roots: [root.path]),
+                                    debounce: 0.02, maxDebounce: 0.02, pathCooldown: 30,
+                                    onCommit: { id, _, _ in
+            if id == 10 { initial.fulfill() }
+            else {
+                XCTAssertEqual(id, 19)
+                deferred.fulfill()
+            }
+        })
+        defer { handler.stop() }
+        handler.ingest(events: [FileSystemEvent(path: root.path, id: 10)])
+        handler.flushPendingNow()
+        wait(for: [initial], timeout: 3)
+        handler.ingest(events: [FileSystemEvent(path: root.path, id: 20),
+                                FileSystemEvent(path: root.path, id: 40),
+                                FileSystemEvent(path: other.path, id: 50)])
+        wait(for: [deferred], timeout: 3)
+    }
+
+    func testHistorySentinelSurvivesFailedCheckpointCommit() throws {
+        let failed = expectation(description: "First checkpoint write failed")
+        let retried = expectation(description: "History completion retried")
+        let recorder = CommitAttemptRecorder()
+        let handler = ChangeHandler(db: database, config: IndexConfig(roots: [root.path]),
+                                    debounce: 30, pathCooldown: 30, onCommit: { id, history, _ in
+            XCTAssertEqual(id, 77)
+            XCTAssertTrue(history)
+            if recorder.next() == 1 { throw CocoaError(.fileWriteUnknown) }
+            retried.fulfill()
+        }, onError: { _ in failed.fulfill() })
+        defer { handler.stop() }
+        handler.ingest(events: [FileSystemEvent(path: "/", id: 77, flags: UInt32(kFSEventStreamEventFlagHistoryDone))])
+        handler.flushPendingNow()
+        wait(for: [failed], timeout: 3)
+        handler.flushPendingNow()
+        wait(for: [retried], timeout: 3)
+    }
+
+    private final class CommitAttemptRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var attempts = 0
+
+        func next() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            attempts += 1
+            return attempts
+        }
     }
 
     func testNamePatternsAndFolderExclusionsApplyToLiveUpdates() throws {

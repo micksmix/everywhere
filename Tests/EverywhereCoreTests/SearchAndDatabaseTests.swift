@@ -251,6 +251,33 @@ final class DatabaseTests: XCTestCase {
         XCTAssertFalse(db.isMemoryIndexLoaded)
         _ = try db.search(SearchRequest(text: "memo"), useMemory: true)
         XCTAssertTrue(db.isMemoryIndexLoaded)
+        _ = try db.search(SearchRequest(), useMemory: false)
+        XCTAssertFalse(db.isMemoryIndexLoaded)
+    }
+
+    func testPreparedSortParityForSparseEmptyAndCompleteMatches() throws {
+        try db.beginBulkLoad()
+        for number in 0..<300 {
+            let name = number % 50 == 0 ? "record-É-\(number).txt" : "record-\(number).txt"
+            try tree.add(path: "/\(name)", size: Int64(number % 3), modified: Double(number % 5))
+        }
+        try db.endBulkLoad()
+        let disk = try makeDatabase()
+        for key in [SortKey.name, .size, .modified, .kind] {
+            for ascending in [true, false] {
+                try db.prepareSearchIndex(sortKey: key, ascending: ascending)
+                for text in ["record", "É", "record-1", "absent", "record-É* | record-299*"] {
+                    var request = SearchRequest(text: text, sortKey: key, ascending: ascending, limit: 3)
+                    for offset in [0, 3, 7] {
+                        request.offset = offset
+                        let expected = try disk.search(request)
+                        let actual = try db.search(request, useMemory: true)
+                        XCTAssertEqual(actual.total, expected.total)
+                        XCTAssertEqual(actual.entries, expected.entries, "\(key) \(ascending) \(text) \(offset)")
+                    }
+                }
+            }
+        }
     }
 
     func testConcurrentWritesAndMemoryRefreshEndWithCurrentResults() throws {

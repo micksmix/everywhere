@@ -1,8 +1,8 @@
 # Search performance measurements
 
-Measured September 15–16, 2026 on the development Mac using disposable synthetic indexes.
+Measured September 15–16 and October 5, 2026 on the development Mac using disposable synthetic indexes.
 Sections describe the implementation at the time of each measurement; the final section
-records the metadata-filter fast path.
+records literal matching and sort-selection improvements.
 No real user index was opened or modified. These are local measurements, not latency or
 memory guarantees for every disk, filename distribution, or folder depth.
 
@@ -271,3 +271,41 @@ These measurements include exact counts, result sorting, and returned path const
 but exclude UI work. They do not measure the user's real index or Cardinal. Broad filters,
 cache loading, OR groups, and folder/path conditions have different performance.
 The harness and its generated indexes were temporary, outside the repository.
+
+## Literal matching and cached sort selection — October 5, 2026
+
+A disposable release XCTest fixture created one million unique filenames,
+`resource-<number>.swift`, beneath one root, with sizes cycling through 97 values
+and modification times through 101 values. The filename cache and ascending name
+sort were prepared before measurement. Each query ran seven times with a 200-row
+page limit; an unrelated absent query preceded each sample to prevent reuse of a
+previous query's completed candidates. Values below are median engine times, including
+exact counts and returned path construction, excluding cache loading and UI drawing.
+
+| Query | Before | After |
+| --- | ---: | ---: |
+| `resource` | 29.34 ms | 24.98 ms |
+| `resource-12345` | 11.41 ms | 6.90 ms |
+| `missing-zebra` | 2.19 ms | 1.65 ms |
+| `*.swift !*1*` | 81.43 ms | 74.93 ms |
+| `resource-12345 \| resource-98765` | 20.94 ms | 11.38 ms |
+
+The wildcard matcher did not change; its row reflects variation between benchmark runs.
+
+ASCII literal terms of at least four bytes use a compiled, bounded skip table to
+avoid testing every possible substring position. Short terms retain their simple
+byte loop, and Unicode matching retains Swift lowercase semantics. Empty or single
+matches bypass ordering; small candidate sets sort directly even when a full order
+exists. Queries matching every live row reuse the cached order without a bitmap pass.
+Narrowing and identical-query paging continue to reuse completed candidate lists.
+
+Background preparation waits 100 ms after a completed search and is cancelled by
+each new search or active indexing phase. It runs again after searches settle and
+indexing becomes idle. This scheduling change was not included in the engine timings.
+
+The results describe this synthetic filename distribution on the development Mac;
+they are not real-index or end-to-end typing guarantees. No schema or persistent
+index format changed. The benchmark was removed after measurement. Permanent tests
+compare literal matching with Foundation across case modes, negation, ASCII control
+bytes, long terms, and overlapping patterns; sorted-page tests compare sparse,
+empty, and complete results with disk searches across cached sort directions.

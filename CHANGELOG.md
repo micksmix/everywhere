@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.8.0
+
+- Speed up longer literal filename searches with byte-position skipping, and avoid walking the full cached sort order for selective queries. Synthetic one-million-file benchmarks measured selective searches at 6.9 ms versus 11.4 ms and OR queries at 11.4 ms versus 20.9 ms; see [search performance measurements](docs/SEARCH_PERFORMANCE.md).
+- Prioritize typing over background cache preparation: new searches cancel preparation, which resumes after a brief pause once searching settles and indexing is idle.
+- Fix synchronization when reading whether the filename cache is loaded, and allow background preparation to restart after completion or cancellation.
+- Keep the saved journal cursor before the earliest deferred file-system event when more edits arrive for the same folder, and preserve replay completion when a checkpoint write fails.
+
 ## 1.7.0
 
 - Make the first filename search after launch fast: the packed filename cache now loads in the background starting when the app opens, and typing no longer cancels that load, so the first query waits for the remaining load instead of restarting it.

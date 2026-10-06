@@ -245,8 +245,9 @@ You can still use **Choose Application…** to browse manually.
 enabled by default. It caches packed names and metadata for substring, wildcard, OR, and
 negated filename searches, and for regular-expression searches that match names only;
 turn it off to use less active memory and query SQLite directly, which can be slower.
-The cache and selected sort order warm in the background while indexing is idle, and
-small index changes apply incrementally. Filename queries with metadata filters, such as
+The cache and selected sort order warm after a brief typing pause while indexing is idle.
+New searches cancel background preparation, and small index changes apply incrementally.
+Filename queries with metadata filters, such as
 `type:image vacation`, also use the cache when there are no OR groups or folder/path
 conditions. Other filtered queries, folder scopes, and path queries use SQLite-backed engines. Folder scopes traverse parent links
 before filename matching. Full paths are not retained in the memory cache.
@@ -254,6 +255,8 @@ before filename matching. Full paths are not retained in the memory cache.
 Searches start immediately as you type. The first 200 results appear before more rows
 load as you scroll, with an exact match count and no 10,000-result table cap. Narrowing
 a plain query reuses its previous matches when the index and filters are unchanged.
+Longer literal terms skip impossible substring positions, and selective queries avoid
+walking the full cached sort order.
 The status time measures request-to-publication latency, including scheduling, but not
 table drawing.
 

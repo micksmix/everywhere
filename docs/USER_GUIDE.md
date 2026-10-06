@@ -366,6 +366,9 @@ once activity quiets down; ordinary edits still appear within about a second.
 
 At startup, Everywhere catches up on changes recorded while it was closed. A valid saved
 checkpoint lets it check changed directories instead of walking every file again.
+The saved checkpoint stays before edits in folders waiting for a follow-up check,
+including when more edits arrive before the check. A failed checkpoint write preserves
+pending work for replay.
 
 A full check can still occur when:
 
@@ -526,12 +529,14 @@ You can still use **Choose Application…** to browse manually.
 **Settings → Search Performance → Keep filename index in memory** is on
 by default. It speeds up plain filename, wildcard, OR, and negated searches by caching
 packed names and metadata. The cache and selected sort order prepare in the background
-while indexing is idle. Typing cancels background preparation when needed. Small file
+after a brief typing pause while indexing is idle. Each new search cancels background
+preparation, which resumes after searching settles. Small file
 changes apply incrementally; large changes, external database edits, or busy indexing
 may reload the cache. Full paths are reconstructed only for each requested page.
 Filename queries with metadata filters, such as `type:image vacation`, also use the
 cache when they contain no OR groups or folder/path conditions. Other filtered
-queries, folder scopes, regex, and path searches use SQLite-backed engines. Folder scopes narrow the indexed tree before filename matching.
+queries, folder scopes, and path searches use SQLite-backed engines. Regular expressions
+that match names only can also use the cache. Folder scopes narrow the indexed tree before filename matching.
 
 Turn the option off to release the cache and query SQLite directly. This uses less
 active memory, but filename searches can be slower. The operating system and SQLite

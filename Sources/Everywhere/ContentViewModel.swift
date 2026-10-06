@@ -83,7 +83,6 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         self.database = database
         self.indexService = indexService
         scheduleSearch()
-        prepareMemorySearch()
         memorySubscription = AppPreferences.shared.$keepSearchIndexInMemory
             .dropFirst()
             .receive(on: DispatchQueue.main)
@@ -96,9 +95,14 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         indexSubscription = indexService.$phase
             .removeDuplicates()
             .dropFirst()
-            .filter { $0 == .idle }
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.refreshIndexResults() }
+            .sink { [weak self] phase in
+                if phase == .idle {
+                    self?.refreshIndexResults()
+                } else if phase != .waiting {
+                    self?.cancelMemoryPreparation()
+                }
+            }
     }
 
     deinit {
@@ -195,29 +199,33 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     }
 
     private func prepareMemorySearch() {
-        guard AppPreferences.shared.keepSearchIndexInMemory else { return }
-        if database.isMemoryIndexLoaded {
-            warmTask?.cancel()
-            warmCancellation.cancel()
-        } else if warmTask != nil {
-            return
-        }
+        guard AppPreferences.shared.keepSearchIndexInMemory, warmTask == nil, !searchInFlight,
+              indexService.phase == .idle || indexService.phase == .waiting else { return }
         let cancellation = SearchCancellation()
         warmCancellation = cancellation
         let db = database
         let key = sortKey
         let ascending = sortAscending
-        warmTask = Task.detached(priority: .utility) {
+        warmTask = Task.detached(priority: .utility) { [weak self] in
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            guard !Task.isCancelled else { return }
             try? db.prepareSearchIndex(sortKey: key, ascending: ascending, cancellation: cancellation)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.warmCancellation === cancellation else { return }
+                self.warmTask = nil
+            }
         }
+    }
+
+    private func cancelMemoryPreparation() {
+        warmTask?.cancel()
+        warmCancellation.cancel()
+        warmTask = nil
     }
 
     private func scheduleSearch(offset: Int = 0) {
         let useMemory = AppPreferences.shared.keepSearchIndexInMemory
-        if !useMemory {
-            warmTask?.cancel()
-            warmCancellation.cancel()
-        }
+        cancelMemoryPreparation()
         searchInFlight = true
         pendingIndexRefresh = false
         searchTask?.cancel()

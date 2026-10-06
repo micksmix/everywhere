@@ -630,8 +630,8 @@ public final class Database: @unchecked Sendable {
     }
 
     public var isMemoryIndexLoaded: Bool {
-        lock.lock()
-        defer { lock.unlock() }
+        searchLock.lock()
+        defer { searchLock.unlock() }
         return memoryRows != nil
     }
 
