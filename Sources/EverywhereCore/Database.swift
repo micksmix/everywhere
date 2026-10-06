@@ -100,6 +100,7 @@ public final class Database: @unchecked Sendable {
     private let searchReader: OpaquePointer
     private let searchLock = NSLock()
     private var searchCancellation: SearchCancellation?
+    private var searchPathIndex: PathSortIndex?
     private typealias BareRow = (id: Int64, parent: Int64, name: String, isDir: Bool, size: Int64, modified: Double)
     private var memoryRows: FilenameIndex?
     private var memoryVersion: Int64 = -1
@@ -660,6 +661,7 @@ public final class Database: @unchecked Sendable {
             sqlite3_progress_handler(searchReader, 0, nil, nil)
             sqlite3_exec(searchReader, "ROLLBACK", nil, nil, nil)
             searchCancellation = nil
+            searchPathIndex = nil
         }
         try exec(searchReader, "BEGIN")
         if !useMemory {
@@ -676,7 +678,8 @@ public final class Database: @unchecked Sendable {
         let result: SearchResult
         if preparing {
             try refreshMemoryIndex()
-            try memoryRows?.prepareSort(key: request.sortKey, ascending: request.ascending, cancellation: cancellation)
+            try memoryRows?.prepareSort(key: request.sortKey, ascending: request.ascending, cancellation: cancellation,
+                                        pathIndex: { try self.pathSortIndex() })
             result = SearchResult(entries: [], total: 0, elapsedMS: 0)
         } else if request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             result = try recentItems(request)
@@ -778,7 +781,8 @@ public final class Database: @unchecked Sendable {
                                                         size: row.size, modified: row.modified)
                     }
                 }
-                try memoryRows.apply(changedIDs: changedIDs, replacements: replacements, cancellation: searchCancellation)
+                try memoryRows.apply(changedIDs: changedIDs, replacements: replacements, cancellation: searchCancellation,
+                                     pathIndex: { try self.pathSortIndex(memoryIndex: memoryRows) })
                 memoryIncrementalRefreshes += 1
             } else {
                 memoryRows = nil
@@ -804,6 +808,32 @@ public final class Database: @unchecked Sendable {
         return status
     }
 
+    private func pathSortIndex(memoryIndex: FilenameIndex? = nil) throws -> PathSortIndex {
+        if let searchPathIndex { return searchPathIndex }
+        var index = memoryIndex
+        if index == nil, memoryRows != nil {
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(searchReader, "PRAGMA data_version", -1, &statement, nil) == SQLITE_OK, let statement else {
+                throw DatabaseError.sql(Self.errorMessage(searchReader), sql: "PRAGMA data_version")
+            }
+            defer { sqlite3_finalize(statement) }
+            _ = try stepSearch(statement)
+            if memoryVersion == sqlite3_column_int64(statement, 0) { index = memoryRows }
+        }
+        let directories: [PathSortIndex.Directory]
+        if let index {
+            let roots = try bareRows("SELECT id, parent, name, is_dir, size, modified FROM entries WHERE parent = 0")
+                .map { PathSortIndex.Directory(id: $0.id, parent: $0.parent, name: $0.name) }
+            directories = try index.pathDirectories(roots: roots, cancellation: searchCancellation)
+        } else {
+            directories = try bareRows("SELECT id, parent, name, is_dir, size, modified FROM entries WHERE is_dir = 1 OR parent = 0")
+                .map { PathSortIndex.Directory(id: $0.id, parent: $0.parent, name: $0.name) }
+        }
+        let prepared = try PathSortIndex(directories: directories, cancellation: searchCancellation)
+        searchPathIndex = prepared
+        return prepared
+    }
+
     private func isNameQuery(_ request: SearchRequest) -> Bool {
         !request.useRegex && !request.matchPath && !SearchQueryParser.parse(request.text).groups.contains {
             $0.terms.contains { $0.hasPathSeparator }
@@ -817,7 +847,8 @@ public final class Database: @unchecked Sendable {
            !group.filters.contains(where: { if case .scope = $0.predicate { return true }; return false }) {
             try refreshMemoryIndex()
             guard let memoryRows else { return SearchResult(entries: [], total: 0, elapsedMS: 0) }
-            let selected = try memoryRows.select(request: request, cancellation: searchCancellation, filteredGroup: group)
+            let selected = try memoryRows.select(request: request, cancellation: searchCancellation, filteredGroup: group,
+                                                 pathIndex: { try self.pathSortIndex() })
             let paths = try materializePaths(ids: selected.rows.map { $0.0.id })
             let entries = selected.rows.map { row, name in
                 Entry(id: row.id, path: paths[row.id] ?? name, name: name, isDirectory: row.isDirectory,
@@ -964,7 +995,8 @@ public final class Database: @unchecked Sendable {
         if useMemory {
             try refreshMemoryIndex()
             guard let memoryRows else { return SearchResult(entries: [], total: 0, elapsedMS: 0) }
-            let selected = try memoryRows.select(request: request, cancellation: searchCancellation)
+            let selected = try memoryRows.select(request: request, cancellation: searchCancellation,
+                                                 pathIndex: { try self.pathSortIndex() })
             let paths = try materializePaths(ids: selected.rows.map { $0.0.id })
             let entries = selected.rows.map { row, name in
                 Entry(id: row.id, path: paths[row.id] ?? name, name: name, isDirectory: row.isDirectory,
@@ -993,6 +1025,7 @@ public final class Database: @unchecked Sendable {
     private func sortedRows(_ rows: [BareRow], request: SearchRequest) throws -> [BareRow] {
         var matched = rows
         try searchCancellation?.check()
+        let paths = request.sortKey == .path && rows.count > 1 ? try pathSortIndex() : nil
         var comparisons = 0
         try matched.sort { left, right in
             comparisons += 1
@@ -1000,7 +1033,7 @@ public final class Database: @unchecked Sendable {
             let order: ComparisonResult
             switch request.sortKey {
             case .name: order = left.name.compare(right.name, options: .caseInsensitive)
-            case .path: order = left.id == right.id ? .orderedSame : (left.id < right.id ? .orderedAscending : .orderedDescending)
+            case .path: order = paths!.compare(leftParent: left.parent, leftName: left.name, rightParent: right.parent, rightName: right.name)
             case .size: order = left.size == right.size ? .orderedSame : (left.size < right.size ? .orderedAscending : .orderedDescending)
             case .kind: order = left.isDir == right.isDir ? .orderedSame : (!left.isDir ? .orderedAscending : .orderedDescending)
             case .modified: order = left.modified == right.modified ? .orderedSame : (left.modified < right.modified ? .orderedAscending : .orderedDescending)
@@ -1071,8 +1104,8 @@ public final class Database: @unchecked Sendable {
         case .folders: sql += " AND entries.is_dir = 1"
         case .files: sql += " AND entries.is_dir = 0"
         }
-        sql += " ORDER BY \(Self.orderClause(for: request.sortKey, ascending: request.ascending))"
-        if !request.matchCase {
+        if request.sortKey != .path { sql += " ORDER BY \(Self.orderClause(for: request.sortKey, ascending: request.ascending))" }
+        if !request.matchCase && request.sortKey != .path {
             sql += " LIMIT \(max(1, min(request.limit, 100_000))) OFFSET \(max(0, request.offset))"
         }
 
@@ -1110,8 +1143,9 @@ public final class Database: @unchecked Sendable {
             }
         }
 
-        let total = request.matchCase ? rows.count : try count(match: match, request: request)
-        rows = Array(rows.dropFirst(request.matchCase ? max(0, request.offset) : 0).prefix(max(1, min(request.limit, 100_000))))
+        if request.sortKey == .path { rows = try sortedRows(rows, request: request) }
+        let total = request.matchCase || request.sortKey == .path ? rows.count : try count(match: match, request: request)
+        rows = Array(rows.dropFirst(request.matchCase || request.sortKey == .path ? max(0, request.offset) : 0).prefix(max(1, min(request.limit, 100_000))))
         let paths = try materializePaths(ids: rows.map(\.id))
         let entries = rows.map { row in
             Entry(id: row.id, path: paths[row.id] ?? row.name, name: row.name, isDirectory: row.isDir, size: row.size, modified: Date(timeIntervalSince1970: row.modified))
@@ -1128,7 +1162,8 @@ public final class Database: @unchecked Sendable {
                     (candidate.count >= 3 && candidate.allSatisfy(\.isASCII)) ? candidate.lowercased() : nil
                 }
                 let box = regexBox
-                let selected = try memoryRows.selectRegex(request: request, cancellation: searchCancellation, literal: literal) { name in
+                let selected = try memoryRows.selectRegex(request: request, cancellation: searchCancellation, literal: literal,
+                                                          pathIndex: { try self.pathSortIndex() }) { name in
                     box.matches(name)
                 }
                 let paths = try materializePaths(ids: selected.rows.map { $0.0.id })

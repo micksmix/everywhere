@@ -280,6 +280,11 @@ Broad filename searches reuse up to three cached sort orders. Small file updates
 the cache and these orders; larger changes reload the cache. The table remembers the
 selected sort column and direction across launches. **Settings → Search Performance** shows estimated filename-cache and sort-array memory use.
 
+**Path** sorts by the complete path, ignoring case, across all result pages. Path sorting
+uses temporary directory metadata; full paths are not retained in the filename cache
+or database. A directory rename invalidates cached path orders, while metadata-only
+updates preserve name and path orders. Empty searches still show recently modified items.
+
 **Settings → Custom Exclusions** includes **Excluded Folders** with a folder chooser and
 **Excluded Name Patterns** such as `*.tmp; *.log`. Patterns match whole names; existing
 substring exclusions still work separately. Rebuild the index after changing exclusions.
@@ -295,6 +300,8 @@ own writes.
 
 Schema version 4 rebuilds indexes from older schemas to remove duplicate paths created
 by folder updates. Live updates reuse the existing indexed folder tree.
+When a folder is replaced by a file at the same path, checking its parent removes
+the folder's former contents from results and preserves the replacement file.
 
 Select a result and press **⌘I**, or right-click → **Get Info**, to open Finder’s own
 information window. Get Info is also in the Search menu and supports up to ten selected

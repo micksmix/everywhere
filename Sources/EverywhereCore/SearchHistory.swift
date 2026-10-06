@@ -44,27 +44,51 @@ public struct SearchHistory {
     }
 }
 
-public enum SearchHighlights {
-    public static func ranges(in text: String, request: SearchRequest, path: Bool = false) -> [NSRange] {
-        let fullRange = NSRange(text.startIndex..., in: text)
+public struct SearchHighlights {
+    private let request: SearchRequest
+    private let namePatterns: [NSRegularExpression]
+    private let pathPatterns: [NSRegularExpression]
+
+    public init(request: SearchRequest) {
+        self.request = request
+        let options: NSRegularExpression.Options = request.matchCase ? [] : [.caseInsensitive]
         if request.useRegex {
-            guard !path || request.matchPath,
-                  let regex = try? NSRegularExpression(pattern: request.text, options: request.matchCase ? [] : [.caseInsensitive]) else { return [] }
-            return regex.matches(in: text, range: fullRange).map(\.range).filter { $0.length > 0 }
+            let regex = try? NSRegularExpression(pattern: request.text, options: options)
+            namePatterns = regex.map { [$0] } ?? []
+            pathPatterns = request.matchPath ? namePatterns : []
+            return
         }
         let terms = SearchQueryParser.parse(request.text).groups.flatMap(\.terms)
-        var ranges: [NSRange] = []
+        var names: [NSRegularExpression] = []
+        var paths: [NSRegularExpression] = []
         for term in terms where !term.isNegated && FilterQuery.split(term) == nil {
-            let usesPath = request.matchPath || term.hasPathSeparator
-            guard path == usesPath || (!path && !term.hasPathSeparator) else { continue }
             let needles = term.text.split(whereSeparator: { $0 == "*" || $0 == "?" }).map(String.init)
             for needle in needles where !needle.isEmpty {
                 let escaped = NSRegularExpression.escapedPattern(for: needle)
                 let pattern = request.wholeWord && !term.hasWildcards ? "(?<![\\p{L}\\p{N}_])" + escaped + "(?![\\p{L}\\p{N}_])" : escaped
-                guard let regex = try? NSRegularExpression(pattern: pattern, options: request.matchCase ? [] : [.caseInsensitive]) else { continue }
-                ranges.append(contentsOf: regex.matches(in: text, range: fullRange).map(\.range))
+                guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { continue }
+                if !term.hasPathSeparator { names.append(regex) }
+                if request.matchPath || term.hasPathSeparator { paths.append(regex) }
             }
         }
-        return ranges
+        namePatterns = names
+        pathPatterns = paths
+    }
+
+    public func isCompatible(with request: SearchRequest) -> Bool {
+        self.request.text == request.text && self.request.useRegex == request.useRegex
+            && self.request.matchCase == request.matchCase && self.request.matchPath == request.matchPath
+            && self.request.wholeWord == request.wholeWord
+    }
+
+    public func ranges(in text: String, path: Bool = false) -> [NSRange] {
+        let fullRange = NSRange(text.startIndex..., in: text)
+        return (path ? pathPatterns : namePatterns).flatMap { regex in
+            regex.matches(in: text, range: fullRange).map(\.range).filter { !request.useRegex || $0.length > 0 }
+        }
+    }
+
+    public static func ranges(in text: String, request: SearchRequest, path: Bool = false) -> [NSRange] {
+        Self(request: request).ranges(in: text, path: path)
     }
 }

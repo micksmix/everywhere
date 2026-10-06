@@ -73,6 +73,9 @@ Use **Reset to ⌥ Space** to restore the default. Keys refer to their US keyboa
 4. Click a result column heading to sort the search results; click again to reverse the order. The column and direction are saved across launches.
 5. Drag column boundaries to resize them. The app saves the column layout. Cells stay on one line; long values are truncated in the middle. Widen a column or the window to reveal more text.
 
+The **Path** column sorts complete paths, ignoring case. The ordering applies to all
+matches before pages load, so scrolling continues the same order.
+
 Simple name searches match literal fragments anywhere in a name: `port` finds
 `report.pdf`, and `.pas` finds names containing `.pas`, including the dot.
 
@@ -363,6 +366,8 @@ Monitoring batches changes: while large builds or sync tools churn thousands of 
 checks stretch from instant up to a few seconds apart, and a folder checked moments ago
 is not re-checked immediately. Results may lag a few seconds during that churn and settle
 once activity quiets down; ordinary edits still appear within about a second.
+If a folder is replaced by a file at the same path, its former contents disappear
+from results after that folder's parent is checked.
 
 At startup, Everywhere catches up on changes recorded while it was closed. A valid saved
 checkpoint lets it check changed directories instead of walking every file again.
@@ -558,8 +563,11 @@ version 4 are replaced on launch; your files are unaffected.
 The selected sort order prepares in the background after searches while indexing is
 idle; broad filename searches can also build it on demand. Up to three
 column/direction combinations are kept; less-used orders are released. Selective
-queries sort just their matches. The first broad query in a new sort order can take
+queries usually sort just their matches; Path queries reuse a prepared order when
+available. The first broad query in a new sort order can take
 longer while that order is prepared. Small file changes update existing sort orders.
+Metadata-only changes preserve name and path orders; directory renames rebuild path
+orders. Path preparation uses temporary directory metadata without retaining full paths.
 
 **Settings → Search Performance** shows indexed cache items, filename-cache
 storage, and fast-sort storage. These figures estimate allocated arrays, excluding

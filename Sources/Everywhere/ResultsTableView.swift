@@ -78,6 +78,7 @@ struct ResultsTableView: NSViewRepresentable {
         private var lastSelection: Set<Int64> = []
         private var lastSortKey = ""
         private var lastHighlightRequest = SearchRequest()
+        private var highlights: SearchHighlights
 
         private static let iconCache = NSCache<NSString, NSImage>()
 
@@ -90,6 +91,7 @@ struct ResultsTableView: NSViewRepresentable {
 
         init(viewModel: ContentViewModel) {
             self.viewModel = viewModel
+            highlights = SearchHighlights(request: viewModel.displayedRequest)
         }
 
         func tableView(_ tableView: NSTableView, didAdd rowView: NSTableRowView, forRow row: Int) {
@@ -176,7 +178,7 @@ struct ResultsTableView: NSViewRepresentable {
             paragraph.alignment = columnID == "size" || columnID == "modified" ? .right : .left
             let result = NSMutableAttributedString(string: value, attributes: [.paragraphStyle: paragraph])
             guard columnID == "name" || columnID == "path" else { return result }
-            for range in SearchHighlights.ranges(in: value, request: viewModel.displayedRequest, path: columnID == "path") {
+            for range in highlights.ranges(in: value, path: columnID == "path") {
                 result.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize), range: range)
             }
             return result
@@ -376,6 +378,9 @@ struct ResultsTableView: NSViewRepresentable {
             }
 
             if lastResults != viewModel.results || lastHighlightRequest != viewModel.displayedRequest {
+                if !highlights.isCompatible(with: viewModel.displayedRequest) {
+                    highlights = SearchHighlights(request: viewModel.displayedRequest)
+                }
                 lastHighlightRequest = viewModel.displayedRequest
                 let previouslySelected = viewModel.selection
                 lastResults = viewModel.results

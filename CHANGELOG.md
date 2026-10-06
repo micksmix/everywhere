@@ -6,6 +6,9 @@
 - Prioritize typing over background cache preparation: new searches cancel preparation, which resumes after a brief pause once searching settles and indexing is idle.
 - Fix synchronization when reading whether the filename cache is loaded, and allow background preparation to restart after completion or cancellation.
 - Keep the saved journal cursor before the earliest deferred file-system event when more edits arrive for the same folder, and preserve replay completion when a checkpoint write fails.
+- Reuse compiled match-highlighting patterns across result cells and pages to reduce work while drawing and scrolling the table.
+- Remove stale descendants when a folder is replaced by a file at the same path, while preserving the replacement entry and discovering new children if it becomes a folder again.
+- Fix Path sorting to order complete paths case-insensitively across all search modes and pages, using temporary directory metadata and cached row orders without storing full paths in the index.
 
 ## 1.7.0
 

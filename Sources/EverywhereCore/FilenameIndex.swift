@@ -90,10 +90,22 @@ final class FilenameIndex {
         String(decoding: names[row.nameOffset..<(row.nameOffset + Int(row.nameLength))], as: UTF8.self)
     }
 
-    func prepareSort(key: SortKey, ascending: Bool, cancellation: SearchCancellation?) throws {
+    func pathDirectories(roots: [PathSortIndex.Directory], cancellation: SearchCancellation?) throws -> [PathSortIndex.Directory] {
+        var directories = roots
+        for (offset, index) in idOrder.enumerated() {
+            if offset % 1024 == 0 { try cancellation?.check() }
+            let row = rows[index]
+            if row.isDirectory && row.parent != 0 {
+                directories.append(PathSortIndex.Directory(id: row.id, parent: row.parent, name: name(for: row)))
+            }
+        }
+        return directories
+    }
+
+    func prepareSort(key: SortKey, ascending: Bool, cancellation: SearchCancellation?, pathIndex: () throws -> PathSortIndex) throws {
         let ordering = Ordering(key: key, ascending: ascending)
         if sortOrders[ordering] != nil { return }
-        let sorted = try sortedIndices(idOrder, ordering: ordering, cancellation: cancellation)
+        let sorted = try sortedIndices(idOrder, ordering: ordering, cancellation: cancellation, pathIndex: pathIndex)
         if recentOrders.count == 3, let oldest = recentOrders.first {
             sortOrders[oldest] = nil
             recentOrders.removeFirst()
@@ -102,7 +114,8 @@ final class FilenameIndex {
         sortOrders[ordering] = sorted
     }
 
-    func select(request: SearchRequest, cancellation: SearchCancellation?, filteredGroup: FilterQuery.Group? = nil) throws -> (rows: [(Row, String)], total: Int) {
+    func select(request: SearchRequest, cancellation: SearchCancellation?, filteredGroup: FilterQuery.Group? = nil,
+                pathIndex: () throws -> PathSortIndex) throws -> (rows: [(Row, String)], total: Int) {
         let query = NameQuery(request, parsed: filteredGroup.map { ParsedQuery(groups: [ParsedGroup(terms: $0.terms)]) })
         var reuse = false
         var identical = false
@@ -155,7 +168,7 @@ final class FilenameIndex {
         }
         let ordering = Ordering(key: request.sortKey, ascending: request.ascending)
         let alreadySorted = reuse && previousRequest?.sortKey == request.sortKey && previousRequest?.ascending == request.ascending
-        matches = try applyingOrder(matches, ordering: ordering, alreadySorted: alreadySorted, cancellation: cancellation)
+        matches = try applyingOrder(matches, ordering: ordering, alreadySorted: alreadySorted, cancellation: cancellation, pathIndex: pathIndex)
         try cancellation?.check()
         previousRequest = filteredGroup == nil ? request : nil
         previousTerms = filteredGroup == nil ? query.literalTerms : nil
@@ -165,7 +178,7 @@ final class FilenameIndex {
     }
 
     func selectRegex(request: SearchRequest, cancellation: SearchCancellation?,
-                     literal: String?, matchesRegex: (String) -> Bool) throws -> (rows: [(Row, String)], total: Int) {
+                     literal: String?, pathIndex: () throws -> PathSortIndex, matchesRegex: (String) -> Bool) throws -> (rows: [(Row, String)], total: Int) {
         let literalBytes = literal?.utf8.map { foldASCII($0) }
         var matches: [UInt32] = []
         try names.withUnsafeBufferPointer { bytes in
@@ -181,19 +194,20 @@ final class FilenameIndex {
             }
         }
         let ordering = Ordering(key: request.sortKey, ascending: request.ascending)
-        let ordered = try applyingOrder(matches, ordering: ordering, alreadySorted: false, cancellation: cancellation)
+        let ordered = try applyingOrder(matches, ordering: ordering, alreadySorted: false, cancellation: cancellation, pathIndex: pathIndex)
         try cancellation?.check()
         let page = ordered.dropFirst(max(0, request.offset)).prefix(max(1, min(request.limit, 100_000)))
         return (page.map { (rows[$0], name(for: rows[$0])) }, ordered.count)
     }
 
-    private func applyingOrder(_ matches: [UInt32], ordering: Ordering, alreadySorted: Bool, cancellation: SearchCancellation?) throws -> [UInt32] {
+    private func applyingOrder(_ matches: [UInt32], ordering: Ordering, alreadySorted: Bool, cancellation: SearchCancellation?,
+                               pathIndex: () throws -> PathSortIndex) throws -> [UInt32] {
         if alreadySorted || matches.count < 2 { return matches }
-        if matches.count <= max(64, idOrder.count / 128) {
-            return try sortedIndices(matches, ordering: ordering, cancellation: cancellation)
+        if matches.count <= max(64, idOrder.count / 128), ordering.key != .path || sortOrders[ordering] == nil {
+            return try sortedIndices(matches, ordering: ordering, cancellation: cancellation, pathIndex: pathIndex)
         }
         if sortOrders[ordering] == nil && matches.count >= max(1024, (rows.count - deadRows) / 4) {
-            try prepareSort(key: ordering.key, ascending: ordering.ascending, cancellation: cancellation)
+            try prepareSort(key: ordering.key, ascending: ordering.ascending, cancellation: cancellation, pathIndex: pathIndex)
         }
         if let order = sortOrders[ordering] {
             recentOrders.removeAll { $0 == ordering }
@@ -212,7 +226,7 @@ final class FilenameIndex {
             }
             return ordered
         }
-        return try sortedIndices(matches, ordering: ordering, cancellation: cancellation)
+        return try sortedIndices(matches, ordering: ordering, cancellation: cancellation, pathIndex: pathIndex)
     }
 
     private func foldASCII(_ byte: UInt8) -> UInt8 {
@@ -236,12 +250,40 @@ final class FilenameIndex {
         return false
     }
 
-    func apply(changedIDs: Set<Int64>, replacements: [Int64: IndexRow], cancellation: SearchCancellation?) throws {
+    func apply(changedIDs: Set<Int64>, replacements: [Int64: IndexRow], cancellation: SearchCancellation?,
+               pathIndex: () throws -> PathSortIndex) throws {
         guard !changedIDs.isEmpty else { return }
         previousRequest = nil
         previousTerms = nil
         previousMatches = []
         let positions = Dictionary(uniqueKeysWithValues: changedIDs.compactMap { id in position(for: id).map { (id, $0) } })
+        var idsChanged = false
+        var namesChanged = false
+        var pathsChanged = false
+        var directoriesChanged = false
+        for (offset, id) in changedIDs.enumerated() {
+            if offset % 256 == 0 { try cancellation?.check() }
+            let old = positions[id].map { rows[$0] }
+            let replacement = replacements[id]
+            let addedOrRemoved = old == nil || replacement == nil || replacement?.name.isEmpty == true
+            let sameName: Bool
+            if let old, let replacement {
+                sameName = names[old.nameOffset..<(old.nameOffset + Int(old.nameLength))].elementsEqual(replacement.name.utf8)
+            } else {
+                sameName = false
+            }
+            let sameParent = old?.parent == replacement?.parent
+            idsChanged = idsChanged || addedOrRemoved
+            namesChanged = namesChanged || addedOrRemoved || !sameName
+            pathsChanged = pathsChanged || addedOrRemoved || !sameName || !sameParent
+            if old?.isDirectory == true || replacement?.isDir == true {
+                directoriesChanged = directoriesChanged || addedOrRemoved || !sameName || !sameParent || old?.isDirectory != replacement?.isDir
+            }
+        }
+        if directoriesChanged {
+            for ordering in recentOrders where ordering.key == .path { sortOrders[ordering] = nil }
+            recentOrders.removeAll { $0.key == .path }
+        }
         var touched = Set<UInt32>()
         var live: [UInt32] = []
         for (offset, id) in changedIDs.enumerated() {
@@ -280,21 +322,25 @@ final class FilenameIndex {
                 rows.append(row)
             }
         }
-        var unchanged: [UInt32] = []
-        for (offset, index) in idOrder.enumerated() {
-            if offset % 1024 == 0 { try cancellation?.check() }
-            if !touched.contains(index) { unchanged.append(index) }
+        if idsChanged {
+            var unchanged: [UInt32] = []
+            for (offset, index) in idOrder.enumerated() {
+                if offset % 1024 == 0 { try cancellation?.check() }
+                if !touched.contains(index) { unchanged.append(index) }
+            }
+            idOrder = try merged(unchanged, live.sorted { rows[$0].id < rows[$1].id }, cancellation: cancellation) { rows[$0].id < rows[$1].id }
         }
-        idOrder = try merged(unchanged, live.sorted { rows[$0].id < rows[$1].id }, cancellation: cancellation) { rows[$0].id < rows[$1].id }
         for ordering in recentOrders {
+            if ordering.key == .path && !pathsChanged || ordering.key == .name && !namesChanged { continue }
             guard let previous = sortOrders[ordering] else { continue }
             var retained: [UInt32] = []
             for (offset, index) in previous.enumerated() {
                 if offset % 1024 == 0 { try cancellation?.check() }
                 if !touched.contains(index) { retained.append(index) }
             }
-            let sorted = try sortedIndices(live, ordering: ordering, cancellation: cancellation)
-            sortOrders[ordering] = try merged(retained, sorted, cancellation: cancellation) { less($0, $1, ordering: ordering) }
+            let sorted = try sortedIndices(live, ordering: ordering, cancellation: cancellation, pathIndex: pathIndex, reuseNameOrder: false)
+            let paths = ordering.key == .path ? try pathIndex() : nil
+            sortOrders[ordering] = try merged(retained, sorted, cancellation: cancellation) { less($0, $1, ordering: ordering, paths: paths) }
         }
     }
 
@@ -310,16 +356,139 @@ final class FilenameIndex {
         return idOrder[lower]
     }
 
-    private func sortedIndices(_ indices: [UInt32], ordering: Ordering, cancellation: SearchCancellation?) throws -> [UInt32] {
+    private func sortedIndices(_ indices: [UInt32], ordering: Ordering, cancellation: SearchCancellation?,
+                               pathIndex: () throws -> PathSortIndex, reuseNameOrder: Bool = true) throws -> [UInt32] {
+        if ordering.key == .path && indices.count >= 1024 {
+            return try sortedPathIndices(indices, ascending: ordering.ascending, cancellation: cancellation, pathIndex: pathIndex, reuseNameOrder: reuseNameOrder)
+        }
+        let sameParent = ordering.key == .path && (indices.first.map { first in indices.allSatisfy { rows[$0].parent == rows[first].parent } } ?? true)
+        let paths = ordering.key == .path && !sameParent ? try pathIndex() : nil
         var comparisons = 0
         return try indices.sorted {
             comparisons += 1
             if comparisons % 1024 == 0 { try cancellation?.check() }
-            return less($0, $1, ordering: ordering)
+            return less($0, $1, ordering: ordering, paths: paths)
         }
     }
 
-    private func less(_ leftIndex: UInt32, _ rightIndex: UInt32, ordering: Ordering) -> Bool {
+    private func sortedPathIndices(_ indices: [UInt32], ascending: Bool, cancellation: SearchCancellation?,
+                                   pathIndex: () throws -> PathSortIndex, reuseNameOrder: Bool) throws -> [UInt32] {
+        var byParent: [Int64: [UInt32]] = [:]
+        let nameOrder = sortOrders[Ordering(key: .name, ascending: true)]
+        let reuseNames = reuseNameOrder && nameOrder != nil && indices.count >= idOrder.count / 4
+        if reuseNames {
+            var flags: [UInt64] = []
+            if indices.count != idOrder.count {
+                flags = [UInt64](repeating: 0, count: (rows.count + 63) / 64)
+                for (offset, index) in indices.enumerated() {
+                    if offset % 1024 == 0 { try cancellation?.check() }
+                    flags[Int(index / 64)] |= UInt64(1) << (index % 64)
+                }
+            }
+            for (offset, index) in nameOrder!.enumerated() {
+                if offset % 1024 == 0 { try cancellation?.check() }
+                if flags.isEmpty || flags[Int(index / 64)] & (UInt64(1) << (index % 64)) != 0 {
+                    byParent[rows[index].parent, default: []].append(index)
+                }
+            }
+        } else {
+            for (offset, index) in indices.enumerated() {
+                if offset % 1024 == 0 { try cancellation?.check() }
+                byParent[rows[index].parent, default: []].append(index)
+            }
+        }
+        let nameOrdering = Ordering(key: .name, ascending: ascending)
+        var comparisons = 0
+        var groups: [[UInt32]] = []
+        for var group in byParent.values {
+            try cancellation?.check()
+            if !reuseNames {
+                try group.sort { left, right in
+                    comparisons += 1
+                    if comparisons % 1024 == 0 { try cancellation?.check() }
+                    return less(left, right, ordering: nameOrdering, paths: nil)
+                }
+            } else if !ascending {
+                group.reverse()
+                var start = 0
+                while start < group.count {
+                    if start % 1024 == 0 { try cancellation?.check() }
+                    var end = start + 1
+                    while end < group.count && compareNames(rows[group[start]], rows[group[end]]) == .orderedSame {
+                        if end % 1024 == 0 { try cancellation?.check() }
+                        end += 1
+                    }
+                    group[start..<end].reverse()
+                    start = end
+                }
+            }
+            groups.append(group)
+        }
+        byParent.removeAll()
+        if groups.count == 1 { return groups[0] }
+        let paths = try pathIndex()
+        let ordering = Ordering(key: .path, ascending: ascending)
+        var positions = [Int](repeating: 0, count: groups.count)
+        var heap: [Int] = []
+        func precedes(_ left: UInt32, _ right: UInt32) throws -> Bool {
+            comparisons += 1
+            if comparisons % 1024 == 0 { try cancellation?.check() }
+            return less(left, right, ordering: ordering, paths: paths)
+        }
+        func push(_ group: Int) throws {
+            heap.append(group)
+            var child = heap.count - 1
+            while child > 0 {
+                let parent = (child - 1) / 2
+                if try !precedes(groups[heap[child]][positions[heap[child]]], groups[heap[parent]][positions[heap[parent]]]) { break }
+                heap.swapAt(child, parent)
+                child = parent
+            }
+        }
+        func pop() throws -> Int {
+            let first = heap[0]
+            let last = heap.removeLast()
+            if !heap.isEmpty {
+                heap[0] = last
+                var parent = 0
+                while parent * 2 + 1 < heap.count {
+                    var child = parent * 2 + 1
+                    if child + 1 < heap.count,
+                       try precedes(groups[heap[child + 1]][positions[heap[child + 1]]], groups[heap[child]][positions[heap[child]]]) { child += 1 }
+                    if try !precedes(groups[heap[child]][positions[heap[child]]], groups[heap[parent]][positions[heap[parent]]]) { break }
+                    heap.swapAt(child, parent)
+                    parent = child
+                }
+            }
+            return first
+        }
+        for group in groups.indices { try push(group) }
+        var result: [UInt32] = []
+        result.reserveCapacity(indices.count)
+        while !heap.isEmpty {
+            try cancellation?.check()
+            let group = try pop()
+            let start = positions[group]
+            var end = groups[group].count
+            if let next = heap.first {
+                let boundary = groups[next][positions[next]]
+                var lower = start
+                var upper = end
+                while lower < upper {
+                    let middle = (lower + upper) / 2
+                    if try precedes(groups[group][middle], boundary) { lower = middle + 1 }
+                    else { upper = middle }
+                }
+                end = max(start + 1, lower)
+            }
+            result.append(contentsOf: groups[group][start..<end])
+            positions[group] = end
+            if end < groups[group].count { try push(group) }
+        }
+        return result
+    }
+
+    private func less(_ leftIndex: UInt32, _ rightIndex: UInt32, ordering: Ordering, paths: PathSortIndex?) -> Bool {
         let left = rows[leftIndex]
         let right = rows[rightIndex]
         let primary: ComparisonResult
@@ -328,7 +497,14 @@ final class FilenameIndex {
         case .size: primary = left.size == right.size ? .orderedSame : (left.size < right.size ? .orderedAscending : .orderedDescending)
         case .modified: primary = left.modified == right.modified ? .orderedSame : (left.modified < right.modified ? .orderedAscending : .orderedDescending)
         case .kind: primary = left.isDirectory == right.isDirectory ? .orderedSame : (!left.isDirectory ? .orderedAscending : .orderedDescending)
-        case .path: primary = left.id == right.id ? .orderedSame : (left.id < right.id ? .orderedAscending : .orderedDescending)
+        case .path:
+            if left.parent == right.parent {
+                primary = compareNames(left, right)
+            } else if let order = paths!.compareParents(left.parent, right.parent) {
+                primary = order == .orderedSame ? compareNames(left, right) : order
+            } else {
+                primary = paths!.compare(leftParent: left.parent, leftName: name(for: left), rightParent: right.parent, rightName: name(for: right))
+            }
         }
         if primary != .orderedSame { return primary == (ordering.ascending ? .orderedAscending : .orderedDescending) }
         if ordering.key != .name {

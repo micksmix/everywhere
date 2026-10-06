@@ -57,6 +57,39 @@ final class IndexerTests: XCTestCase {
         XCTAssertTrue(try search("nested-file").isEmpty)
     }
 
+    func testReplacingFolderWithFilePrunesDescendantsAndCanBecomeFolderAgain() throws {
+        let config = config()
+        try FilesystemIndexer(db: database, config: config).run()
+        let docs = root.appendingPathComponent("Docs")
+        let originalID = try XCTUnwrap(search("Docs").first?.id)
+        XCTAssertEqual(try database.search(SearchRequest(text: "nested-file"), useMemory: true).total, 1)
+        try FileManager.default.removeItem(at: docs)
+        try Data([1, 2, 3]).write(to: docs)
+        try Reconciler(db: database, config: config, roots: [root.path], skipUnchangedDirs: false,
+                       scanKnownSubdirectories: false).run()
+        for memory in [true, false] {
+            XCTAssertEqual(try database.search(SearchRequest(text: "nested-file"), useMemory: memory).total, 0)
+            let replaced = try XCTUnwrap(database.search(SearchRequest(text: "Docs"), useMemory: memory).entries.first)
+            XCTAssertEqual(replaced.id, originalID)
+            XCTAssertFalse(replaced.isDirectory)
+            XCTAssertEqual(replaced.size, 3)
+            XCTAssertTrue(try database.children(ofParent: replaced.id).isEmpty)
+        }
+        try FileManager.default.removeItem(at: docs)
+        let deep = docs.appendingPathComponent("New/Deep")
+        try FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+        try Data().write(to: deep.appendingPathComponent("replacement.txt"))
+        try Reconciler(db: database, config: config, roots: [root.path], skipUnchangedDirs: false,
+                       scanKnownSubdirectories: false).run()
+        for memory in [true, false] {
+            let folder = try XCTUnwrap(database.search(SearchRequest(text: "Docs"), useMemory: memory).entries.first)
+            XCTAssertTrue(folder.isDirectory)
+            XCTAssertEqual(folder.id, originalID)
+            XCTAssertEqual(try database.search(SearchRequest(text: "replacement"), useMemory: memory).entries.map(\.path),
+                           [deep.appendingPathComponent("replacement.txt").path])
+        }
+    }
+
     func testFolderAndWildcardExclusionsInWalkAndReconciliation() throws {
         let excluded = root.appendingPathComponent("cache")
         let retained = root.appendingPathComponent("cache-other")

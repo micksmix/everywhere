@@ -49,20 +49,27 @@ final class SearchQueryTests: XCTestCase {
 
 final class TestTree {
     let db: Database
+    private let rootPath: String
     private var ids: [String: Int64] = [:]
 
-    init(db: Database) {
+    init(db: Database, rootPath: String = "/") {
         self.db = db
+        self.rootPath = rootPath
     }
 
     @discardableResult
     func add(path: String, isDir: Bool = false, size: Int64 = 0, modified: Double = 0) throws -> Int64 {
         if let cached = ids[path] { return cached }
+        if path == rootPath {
+            let id = try db.ensureRootRow(path: rootPath)
+            ids[path] = id
+            return id
+        }
         let name = (path as NSString).lastPathComponent
         let parentPath = (path as NSString).deletingLastPathComponent
         let parentID: Int64
-        if parentPath == "/" || parentPath.isEmpty {
-            parentID = try db.ensureRootRow(path: "/")
+        if parentPath == rootPath || parentPath.isEmpty {
+            parentID = try db.ensureRootRow(path: rootPath)
         } else {
             parentID = try add(path: parentPath, isDir: true)
         }
@@ -733,6 +740,116 @@ final class DatabaseTests: XCTestCase {
 }
 
 extension DatabaseTests {
+    func testPathSortUsesFullLexicalOrderAcrossEnginesAndPages() throws {
+        for path in ["/z/report.txt", "/a/report.txt", "/a.b/report.txt", "/a-/report.txt",
+                     "/a0/report.txt", "/A/report.txt", "/é/report.txt", "/e\u{301}/report.txt",
+                     "/ss/report.txt", "/ß/report.txt", "/a/report-.txt", "/a/report/inside.txt",
+                     "/report.txt", "/report.b.txt", "/report/inside.txt"] {
+            try tree.add(path: path)
+        }
+        let disk = try makeDatabase()
+        let requests = [SearchRequest(text: "report"), SearchRequest(text: "*report*"),
+                        SearchRequest(text: "ext:txt report"), SearchRequest(text: "report", useRegex: true),
+                        SearchRequest(text: "report", wholeWord: true), SearchRequest(text: "report", matchPath: true),
+                        SearchRequest(text: "in:/a report | in:/z report")]
+        for request in requests {
+            let all = try disk.search(request).entries
+            for memory in [false, true] {
+                for ascending in [true, false] {
+                    let expected = all.sorted {
+                        let order = $0.path.compare($1.path, options: .caseInsensitive)
+                        return order == .orderedSame ? $0.id < $1.id : order == (ascending ? .orderedAscending : .orderedDescending)
+                    }
+                    var sorted = request
+                    sorted.sortKey = .path
+                    sorted.ascending = ascending
+                    sorted.limit = 3
+                    var actual: [Entry] = []
+                    repeat {
+                        sorted.offset = actual.count
+                        let page = try db.search(sorted, useMemory: memory)
+                        XCTAssertEqual(page.total, expected.count)
+                        actual += page.entries
+                        if page.entries.isEmpty { break }
+                    } while actual.count < expected.count
+                    XCTAssertEqual(actual.map(\.id), expected.map(\.id), "\(request) \(memory) \(ascending)")
+                }
+            }
+        }
+    }
+
+    func testPathSortHandlesOverlappingRoots() throws {
+        let other = TestTree(db: db, rootPath: "/Volumes/z")
+        let earlier = TestTree(db: db, rootPath: "/Volumes/a")
+        let nested = TestTree(db: db, rootPath: "/Volumes/a/nested")
+        try other.add(path: "/Volumes/z/file.txt")
+        try earlier.add(path: "/Volumes/a/file.txt")
+        try earlier.add(path: "/Volumes/a/nested.b.txt")
+        try nested.add(path: "/Volumes/a/nested/file.txt")
+        let expected = try db.search(SearchRequest(text: "*")).entries.sorted {
+            let order = $0.path.compare($1.path, options: .caseInsensitive)
+            return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+        }
+        for memory in [false, true] {
+            XCTAssertEqual(try db.search(SearchRequest(text: "*", sortKey: .path), useMemory: memory).entries, expected)
+        }
+    }
+
+    func testCachedPathSortRefreshesFilesAndDirectorySubtrees() throws {
+        try db.beginBulkLoad()
+        for directory in 0..<20 {
+            for file in 0..<100 {
+                try tree.add(path: "/group-\(19 - directory)/record-\(99 - file).txt")
+                if file % 20 == 0 { try tree.add(path: "/group-\(19 - directory)/Record-\(99 - file).txt") }
+            }
+        }
+        for path in ["/group-É/record-extra.txt", "/group-e\u{301}/Record-extra.txt", "/group-ss/record-X.txt", "/group-ß/Record-X.txt"] {
+            try tree.add(path: path)
+        }
+        try db.endBulkLoad()
+        let disk = try makeDatabase()
+        func verify(_ ascending: Bool) throws {
+            let expected = try disk.search(SearchRequest(text: "record")).entries.sorted {
+                let order = $0.path.compare($1.path, options: .caseInsensitive)
+                return order == .orderedSame ? $0.id < $1.id : order == (ascending ? .orderedAscending : .orderedDescending)
+            }
+            var request = SearchRequest(text: "record", sortKey: .path, ascending: ascending, limit: 73)
+            for offset in [0, 73, expected.count - 20] {
+                request.offset = offset
+                let actual = try db.search(request, useMemory: true)
+                XCTAssertEqual(actual.total, expected.count)
+                XCTAssertEqual(actual.entries, Array(expected.dropFirst(offset).prefix(73)))
+                XCTAssertLessThanOrEqual(actual.cacheStatistics.sortCount, 3)
+                XCTAssertEqual(actual.cacheStatistics.fullLoads, 1)
+            }
+        }
+        try db.prepareSearchIndex(sortKey: .name)
+        try db.prepareSearchIndex(sortKey: .path)
+        try db.prepareSearchIndex(sortKey: .path, ascending: false)
+        try verify(true)
+        try verify(false)
+        let changed = try XCTUnwrap(tree.id(for: "/group-19/record-99.txt"))
+        let parent = try XCTUnwrap(tree.id(for: "/group-19"))
+        try db.insert(rows: [IndexRow(id: changed, parent: parent, name: "record-99.txt", isDir: false, size: 999, modified: 999)])
+        try verify(true)
+        try verify(false)
+        try tree.add(path: "/group-19/record-added.txt")
+        try verify(true)
+        try verify(false)
+        _ = try db.search(SearchRequest(text: "record"), useMemory: true)
+        for number in 0..<1200 { try tree.add(path: "/group-19/record-batch-\(number).txt") }
+        try verify(true)
+        try verify(false)
+        try db.deleteSubtree(id: XCTUnwrap(tree.id(for: "/group-10")))
+        try tree.add(path: "/group-10.b/record-new.txt")
+        try verify(true)
+        try verify(false)
+        let cancellation = SearchCancellation()
+        cancellation.cancel()
+        XCTAssertThrowsError(try db.prepareSearchIndex(sortKey: .path, cancellation: cancellation))
+        try verify(true)
+    }
+
     func testPagedSearchMatchesCompleteResultsAcrossEngines() throws {
         for index in 0..<47 {
             try tree.add(path: "/group/file-\(index).txt", size: Int64(index % 5), modified: Double(index % 7))

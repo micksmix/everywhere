@@ -2,7 +2,7 @@
 
 Measured September 15–16 and October 5, 2026 on the development Mac using disposable synthetic indexes.
 Sections describe the implementation at the time of each measurement; the final section
-records literal matching and sort-selection improvements.
+records result-highlighting improvements.
 No real user index was opened or modified. These are local measurements, not latency or
 memory guarantees for every disk, filename distribution, or folder depth.
 
@@ -296,7 +296,8 @@ ASCII literal terms of at least four bytes use a compiled, bounded skip table to
 avoid testing every possible substring position. Short terms retain their simple
 byte loop, and Unicode matching retains Swift lowercase semantics. Empty or single
 matches bypass ordering; small candidate sets sort directly even when a full order
-exists. Queries matching every live row reuse the cached order without a bitmap pass.
+exists, except Path queries, which reuse a prepared path order to avoid rebuilding
+directory metadata. Queries matching every live row reuse the cached order without a bitmap pass.
 Narrowing and identical-query paging continue to reuse completed candidate lists.
 
 Background preparation waits 100 ms after a completed search and is cancelled by
@@ -309,3 +310,78 @@ index format changed. The benchmark was removed after measurement. Permanent tes
 compare literal matching with Foundation across case modes, negation, ASCII control
 bytes, long terms, and overlapping patterns; sorted-page tests compare sparse,
 empty, and complete results with disk searches across cached sort directions.
+
+## Compiled result highlighting — October 5, 2026
+
+A disposable release XCTest harness compared the previous per-cell highlight
+implementation with a compiled highlighter shared across cells. It used 200 names,
+`Annual-Report-<number>.pdf`, and their paths beneath
+`/Users/example/Documents/Annual Reports/`. The query was
+`report annual ext:pdf !draft` with Match Path enabled. Both implementations produced
+the same 1,200 ranges over the 400 name/path strings. Fifteen runs measured:
+
+| Highlight calculation | Median |
+| --- | ---: |
+| Previous per-cell query parsing and pattern compilation | 3.06 ms |
+| One compiled highlighter, including its preparation | 0.54 ms |
+
+The table now keeps compiled name/path patterns until the query text or matching
+options change. Paging, sorting, and kind/hidden-filter changes reuse those patterns.
+This measurement isolates highlight calculation; it does not include database
+search, attributed-string construction, AppKit layout, or drawing. The disposable
+benchmark was removed. Permanent tests cover name/path routing, quoted filter text,
+Unicode ranges, invalid regexes, empty regex matches, and configuration invalidation.
+
+## Complete-path sorting — October 5, 2026
+
+Path sorting previously ordered entries by their database IDs, which follow scan
+insertion order. It now compares complete paths case-insensitively before selecting
+pages, including literal, wildcard/boolean, metadata-filtered, whole-word, regex,
+and Match Path searches. Empty searches retain their recently modified ordering.
+
+A disposable release harness, compiled with Swift whole-module optimization, created
+one million files in 1,000 directories beneath
+`/Users/benchmark/Documents/projects`. Directory and file names were inserted in
+reverse numeric order; each directory contained the same 1,000 `record-<number>.txt`
+names. The ascending name order was prepared before preparing Path order. Seven
+samples per query used a 200-row limit and an absent query between samples to avoid
+candidate reuse. Times include matching, exact counts, and returned path construction,
+excluding initial cache loading and UI drawing.
+
+| Operation | Previous ID ordering (incorrect) | Complete-path ordering |
+| --- | ---: | ---: |
+| Prepare Path order after name preparation | 6.89 ms | 46.79 ms |
+| `record`, median | 14.28 ms | 13.73 ms |
+| `record-999`, median | 4.06 ms | 4.43 ms |
+| Next `record` page with candidate reuse | 0.33 ms | 0.31 ms |
+| `record-999`, disk mode, single sample | 160.53 ms | 184.80 ms |
+
+The previous implementation failed the first-page lexical-order check; the new one
+passed. These timings compare the cost of adding correct ordering, not equivalent
+results. Initial cache loading and name preparation took 547 ms before and 498 ms
+after; that difference is run variation, not an optimization measured here. A cold
+Path order can cost more, and disk searches must load directory metadata and sort
+matches. The small warm-query differences should not be treated as speed guarantees.
+
+Path preparation groups row positions by parent, reuses an available name order,
+and merges the groups using directory-prefix ranks. Ancestor comparisons stream name
+components; Unicode comparisons construct temporary strings when needed. Directory
+metadata and ancestor-ID chains are released after each search or preparation. No
+full paths are retained in the filename cache or stored in SQLite. Cached orders
+remain four-byte positions, with at most three orders. Metadata-only patches preserve
+name/path orders; directory placement or name changes invalidate path orders.
+
+Estimated retained cache and sort arrays were unchanged at 70,938,400 bytes in both
+runs; the database was unchanged at 108,118,016 bytes. Temporary directory-rank
+storage was estimated at 148,453 bytes for this fixture. These estimates exclude
+other temporary grouping/merge arrays, allocator overhead, and whole-process memory;
+directory work grows with directory count and hierarchy depth.
+
+Permanent tests compare actual materialized paths with Foundation ordering across
+case variants, punctuation, Unicode equivalents, overlapping roots, both directions,
+and pages. They also cover metadata updates, large incremental additions, subtree
+deletions, and cancellation. The benchmark remains a disposable local harness.
+A separate isolated AppKit harness verified native Path sort descriptors in both
+directions and continued ordering after loading another page. It also checked query
+replacement and highlight refreshes programmatically; physical keyboard/mouse input
+and end-to-end drawing latency were not measured.

@@ -209,4 +209,43 @@ final class SearchInteractionTests: XCTestCase {
         XCTAssertEqual(SearchHighlights.ranges(in: "file123.txt", request: SearchRequest(text: "[0-9]+", useRegex: true)), [NSRange(location: 4, length: 3)])
         XCTAssertTrue(SearchHighlights.ranges(in: text, request: SearchRequest(text: "[", useRegex: true)).isEmpty)
     }
+
+    func testCompiledHighlightsPreserveNameAndPathRulesAcrossRows() {
+        let highlights = SearchHighlights(request: SearchRequest(text: "report* ext:pdf !draft /Docs/"))
+        XCTAssertEqual(highlights.ranges(in: "Report.pdf"), [NSRange(location: 0, length: 6)])
+        XCTAssertEqual(highlights.ranges(in: "/Docs/Report.pdf", path: true), [NSRange(location: 0, length: 6)])
+        XCTAssertTrue(highlights.ranges(in: "draft.pdf").isEmpty)
+        XCTAssertTrue(highlights.ranges(in: "/Elsewhere/Report.pdf", path: true).isEmpty)
+        let both = SearchHighlights(request: SearchRequest(text: "report", matchPath: true))
+        XCTAssertEqual(both.ranges(in: "Report.pdf"), [NSRange(location: 0, length: 6)])
+        XCTAssertEqual(both.ranges(in: "/Report/Report.pdf", path: true),
+                       [NSRange(location: 1, length: 6), NSRange(location: 8, length: 6)])
+        let quoted = SearchHighlights(request: SearchRequest(text: "\"ext:pdf\""))
+        XCTAssertEqual(quoted.ranges(in: "ext:pdf"), [NSRange(location: 0, length: 7)])
+    }
+
+    func testCompiledHighlightsUpdateOnlyForMatchingOptions() {
+        let request = SearchRequest(text: "report")
+        let highlights = SearchHighlights(request: request)
+        var paged = request
+        paged.offset = 200
+        paged.limit = 50
+        paged.kind = .files
+        paged.includeHidden = false
+        paged.sortKey = .size
+        paged.ascending = false
+        XCTAssertTrue(highlights.isCompatible(with: paged))
+        for changed in [SearchRequest(text: "reports"), SearchRequest(text: "report", matchPath: true),
+                        SearchRequest(text: "report", useRegex: true), SearchRequest(text: "report", matchCase: true),
+                        SearchRequest(text: "report", wholeWord: true)] {
+            XCTAssertFalse(highlights.isCompatible(with: changed))
+        }
+    }
+
+    func testCompiledRegexHighlightsSkipEmptyMatchesAndPreserveUnicodeRanges() {
+        let highlights = SearchHighlights(request: SearchRequest(text: "report|$", useRegex: true))
+        XCTAssertEqual(highlights.ranges(in: "📁 Report.pdf"), [NSRange(location: 3, length: 6)])
+        XCTAssertTrue(highlights.ranges(in: "/Report.pdf", path: true).isEmpty)
+        XCTAssertTrue(SearchHighlights(request: SearchRequest(text: "[", useRegex: true)).ranges(in: "Report").isEmpty)
+    }
 }

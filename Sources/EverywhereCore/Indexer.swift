@@ -659,6 +659,10 @@ public final class Reconciler: IndexEngine {
                 id = row?.id ?? (try? takeID()) ?? 0
                 let indexRow = IndexRow(id: id, parent: dirID, name: item.name, isDir: item.isDir, size: item.size, modified: item.modified)
                 do {
+                    if let row, row.isDirectory && !item.isDir {
+                        try db.deleteSubtree(id: row.id)
+                        bump { $0.deleted += 1 }
+                    }
                     try buffer.add(indexRow)
                     bump {
                         if item.isDir { $0.dirs += 1 } else { $0.files += 1 }
