@@ -2,6 +2,19 @@ import Foundation
 import Combine
 import CoreServices
 
+struct JournalReplayProgress {
+    private(set) var pendingVolumes: Set<String>
+
+    init(volumes: [String] = []) {
+        pendingVolumes = Set(volumes)
+    }
+
+    mutating func finish(volume: String) -> Bool {
+        guard pendingVolumes.remove(volume) != nil else { return false }
+        return pendingVolumes.isEmpty
+    }
+}
+
 public final class IndexService: ObservableObject, @unchecked Sendable {
     public enum Phase: Equatable {
         case waiting
@@ -44,10 +57,14 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     public let settings: IndexSettings
     public let database: Database
 
-    private var monitor: FSEventsMonitor?
-    private var changeHandler: ChangeHandler?
+    private var monitors: [FSEventsMonitor] = []
+    private var changeHandlers: [ChangeHandler] = []
+    private var monitoredVolumes: [IndexedVolume] = []
+    private var replayProgress = JournalReplayProgress()
+    private var lastFullCheckDate: Date?
     private var activeControl = IndexingControl()
     private let indexingQueue = DispatchQueue(label: "app.everywhere.indexing", qos: .utility)
+    private let changesQueue = DispatchQueue(label: "app.everywhere.volume-changes", qos: .utility)
     private var started = false
     @Published public private(set) var isCompacting = false
     @Published public private(set) var compactionMessage: String?
@@ -61,6 +78,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         self.settings = settings
         self.database = database
         self.accessCheck = accessCheck
+        lastFullCheckDate = IndexCheckpoint.load(databasePath: database.path)?.scannedAt
         launchAccessState = accessCheck == nil ? .ready : .unchecked
     }
 
@@ -116,8 +134,8 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         countdownTimer?.invalidate()
         maintenanceTimer?.invalidate()
         activeControl.cancel()
-        monitor?.stop()
-        changeHandler?.stop()
+        monitors.forEach { $0.stop() }
+        changeHandlers.forEach { $0.stop() }
     }
 
     public var indexDirectory: String {
@@ -216,12 +234,36 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
             }
         }
         let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            self?.checkIndexedVolumes()
+            self?.checkScheduledFullCheck()
             self?.compactIndexIfNeeded()
             self?.updateRebuildSuggestion()
         }
         maintenanceTimer = timer
         RunLoop.main.add(timer, forMode: .common)
         scheduleStartup()
+    }
+
+    public func checkScheduledFullCheck(now: Date = Date()) {
+        guard started, settings.indexingEnabled, launchAccessState == .ready,
+              !settings.needsLocationSetup, phase == .idle, !isCompacting,
+              scheduledFullCheckIsDue(now: now) else { return }
+        reconcileAndMonitor()
+    }
+
+    private func scheduledFullCheckIsDue(now: Date) -> Bool {
+        guard let interval = settings.fullCheckInterval.seconds else { return false }
+        guard let baseline = lastFullCheckDate else { return true }
+        return now.timeIntervalSince(baseline) >= interval
+    }
+
+    private func checkIndexedVolumes() {
+        guard started, settings.indexingEnabled, settings.liveUpdates, phase == .idle, !isCompacting,
+              !settings.needsLocationSetup else { return }
+        let volumes = IndexedVolume.discover(config: makeConfig())
+        guard volumes.count != monitoredVolumes.count
+            || !zip(volumes, monitoredVolumes).allSatisfy({ $0.hasSameTopology(as: $1) }) else { return }
+        reconcileAndMonitor()
     }
 
     func compactIndexIfNeeded(now: Date = Date()) {
@@ -310,7 +352,11 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                     self.indexedRows = count
                     let paused = self.isPaused
                     if count == 0 { self.rebuild() }
-                    else if let checkpoint = self.validCheckpoint() { self.replayChanges(checkpoint) }
+                    else if let checkpoint = self.validCheckpoint() {
+                        self.lastFullCheckDate = checkpoint.scannedAt
+                        if self.scheduledFullCheckIsDue(now: Date()) { self.reconcileAndMonitor() }
+                        else { self.replayChanges(checkpoint) }
+                    }
                     else { self.reconcileAndMonitor() }
                     if paused && self.canPause { self.togglePause() }
                 }
@@ -334,8 +380,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
 
     private func validCheckpoint() -> IndexCheckpoint? {
         guard let checkpoint = IndexCheckpoint.load(databasePath: database.path),
-              checkpoint.isValid(databasePath: database.path, config: makeConfig(),
-                                 currentEventID: FSEventsGetCurrentEventId()) else { return nil }
+              checkpoint.isValid(databasePath: database.path, config: makeConfig()) else { return nil }
         return checkpoint
     }
 
@@ -377,9 +422,9 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
 
         let db = database
         let config = makeConfig()
-        let checkpoint = IndexCheckpoint(eventID: max(1, FSEventsGetCurrentEventId()),
-                                         databasePath: db.path, config: config)
-        let monitoring = startMonitor(checkpoint: checkpoint, suspended: true)
+        let volumes = IndexedVolume.discover(config: config)
+        let checkpoint = IndexCheckpoint(databasePath: db.path, config: config, volumes: volumes)
+        let monitoring = startMonitor(checkpoint: checkpoint, suspended: true, volumes: volumes)
         indexingQueue.async { [weak self] in
             guard control.waitUntilRunning() else { return }
             let progress: @Sendable (IndexerStats) -> Void = { [weak self] stats in
@@ -421,12 +466,13 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                     self.indexedRows = count
                     self.indexRevision += 1
                     self.isPaused = false
+                    self.lastFullCheckDate = checkpoint.scannedAt
                     if rebuild { self.settings.noteFullRebuild() }
                     if monitoring {
                         do { try checkpoint.save(databasePath: db.path) }
                         catch { self.lastError = String(describing: error) }
                         self.phase = .reconciling
-                        self.changeHandler?.resume()
+                        self.changeHandlers.forEach { $0.resume() }
                     } else {
                         self.phase = .idle
                         self.noteScanFinished()
@@ -455,7 +501,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
             return
         }
         guard launchAccessState == .ready, settings.indexingEnabled, !settings.needsLocationSetup else { return }
-        if monitor != nil {
+        if !monitors.isEmpty {
             live = true
             return
         }
@@ -463,66 +509,94 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
             cancelCountdown()
         }
         guard phase == .waiting || phase == .idle else { return }
-        if let checkpoint = validCheckpoint() { replayChanges(checkpoint) }
+        if let checkpoint = validCheckpoint() {
+            lastFullCheckDate = checkpoint.scannedAt
+            if scheduledFullCheckIsDue(now: Date()) { reconcileAndMonitor() }
+            else { replayChanges(checkpoint) }
+        }
         else { reconcileAndMonitor() }
     }
 
-    private func startMonitor(checkpoint: IndexCheckpoint, suspended: Bool = false) -> Bool {
-        guard monitor == nil else { return true }
+    private func startMonitor(checkpoint: IndexCheckpoint, suspended: Bool = false,
+                              volumes: [IndexedVolume]? = nil) -> Bool {
+        guard monitors.isEmpty else { return true }
         let control = activeControl
         let db = database
+        let config = makeConfig()
+        let volumes = volumes ?? IndexedVolume.discover(config: config)
+        monitoredVolumes = volumes
+        guard !volumes.isEmpty, Set(volumes.map(\.path)) == Set(checkpoint.volumeCursors.keys) else { return false }
+        replayProgress = JournalReplayProgress(volumes: volumes.map(\.path))
         let writer = IndexCheckpointWriter(checkpoint, databasePath: db.path)
-        let handler = ChangeHandler(db: db, config: makeConfig(), suspended: suspended, control: control,
-            onCommit: { [weak self] eventID, historyDone, stats in
-                guard !control.isCancelled else { return }
-                try writer.commit(eventID: eventID)
-                let count = historyDone ? try db.count() : nil
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, !control.isCancelled else { return }
-                    if let count { self.indexedRows = count }
-                    self.indexRevision += 1
-                    self.progressStats.scannedItems += stats.scannedItems
-                    self.progressStats.scannedDirectories += stats.scannedDirectories
-                    self.progressStats.skipped += stats.skipped
-                    if historyDone {
-                        self.isPaused = false
-                        self.phase = .idle
-                        self.live = self.settings.liveUpdates
-                        if !self.settings.liveUpdates { self.stopMonitor() }
-                        self.noteScanFinished()
-                        self.compactIndexIfNeeded()
-                        self.updateRebuildSuggestion()
-                    }
-                }
-            }, onError: { [weak self] error in
-                DispatchQueue.main.async { [weak self] in
+        for volume in volumes {
+            guard let cursor = checkpoint.volumeCursors[volume.path] else { return false }
+            let handler = ChangeHandler(db: db, config: config, suspended: suspended, control: control,
+                recoveryRoots: volume.roots, queue: changesQueue,
+                onCommit: { [weak self] eventID, historyDone, stats in
                     guard !control.isCancelled else { return }
-                    control.cancel()
-                    self?.stopMonitor()
-                    self?.phase = .idle
-                    self?.isPaused = false
-                    self?.lastError = String(describing: error)
-                }
-            })
-        let monitor = FSEventsMonitor(roots: settings.roots, since: checkpoint.eventID, eventsSink: { events in
-            handler.ingest(events: events)
-        })
-        guard monitor.start() else {
-            monitor.stop()
-            lastError = "File-system monitoring could not start. A full check will be used on the next launch."
-            return false
+                    try writer.commit(volume: volume.path, eventID: eventID,
+                                      journalEventID: IndexedVolume.currentJournalEventID(device: volume.device))
+                    let count = historyDone ? try db.count() : nil
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, !control.isCancelled else { return }
+                        if let count { self.indexedRows = count }
+                        self.indexRevision += 1
+                        self.progressStats.scannedItems += stats.scannedItems
+                        self.progressStats.scannedDirectories += stats.scannedDirectories
+                        self.progressStats.skipped += stats.skipped
+                        if historyDone {
+                            guard self.replayProgress.finish(volume: volume.path) else { return }
+                            self.isPaused = false
+                            self.phase = .idle
+                            self.live = self.settings.liveUpdates
+                            if !self.settings.liveUpdates { self.stopMonitor() }
+                            self.noteScanFinished()
+                            self.compactIndexIfNeeded()
+                            self.updateRebuildSuggestion()
+                        }
+                    }
+                }, onError: { [weak self] error in
+                    DispatchQueue.main.async { [weak self] in
+                        guard !control.isCancelled else { return }
+                        control.cancel()
+                        self?.stopMonitor()
+                        self?.phase = .idle
+                        self?.isPaused = false
+                        self?.lastError = String(describing: error)
+                    }
+                })
+            let since = suspended || volume.journalIdentity == nil ? UInt64(kFSEventStreamEventIdSinceNow) : cursor.eventID
+            let monitor = FSEventsMonitor(volume: volume, since: since) { events in
+                handler.ingest(events: events)
+            }
+            guard monitor.start() else {
+                monitor.stop()
+                handler.stop(cancelControl: false)
+                monitors.forEach { $0.stop() }
+                changeHandlers.forEach { $0.stop(cancelControl: false) }
+                monitors = []
+                changeHandlers = []
+                replayProgress = JournalReplayProgress()
+                lastError = "File-system monitoring could not start. Full checks will be used until monitoring is available."
+                return false
+            }
+            monitors.append(monitor)
+            changeHandlers.append(handler)
+            if suspended || volume.journalIdentity == nil {
+                handler.ingest(events: [FileSystemEvent(path: "", id: cursor.eventID,
+                                                       flags: UInt32(kFSEventStreamEventFlagHistoryDone))])
+            }
         }
-        self.monitor = monitor
-        changeHandler = handler
         live = settings.liveUpdates
         return true
     }
 
     private func stopMonitor() {
-        monitor?.stop()
-        monitor = nil
-        changeHandler?.stop()
-        changeHandler = nil
+        monitors.forEach { $0.stop() }
+        monitors = []
+        changeHandlers.forEach { $0.stop() }
+        changeHandlers = []
+        replayProgress = JournalReplayProgress()
         live = false
     }
 

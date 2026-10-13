@@ -68,6 +68,23 @@ public final class IndexSettings: ObservableObject {
         return seconds.isFinite ? min(max(0, seconds), 31_536_000) : 120
     }
 
+    public enum FullCheckInterval: String, CaseIterable {
+        case off, daily, weekly, monthly
+
+        public var seconds: TimeInterval? {
+            switch self {
+            case .off: return nil
+            case .daily: return 24 * 3600
+            case .weekly: return 7 * 24 * 3600
+            case .monthly: return 30 * 24 * 3600
+            }
+        }
+    }
+
+    @Published public var fullCheckInterval: FullCheckInterval {
+        didSet { defaults.set(fullCheckInterval.rawValue, forKey: "IndexFullCheckInterval") }
+    }
+
     private let defaults: UserDefaults
 
     @Published public private(set) var needsLocationSetup: Bool
@@ -120,6 +137,7 @@ public final class IndexSettings: ObservableObject {
         indexingEnabled = defaults.object(forKey: "IndexingEnabled") == nil || defaults.bool(forKey: "IndexingEnabled")
         startupDelay = defaults.object(forKey: "IndexStartupDelay") == nil ? 120 : defaults.double(forKey: "IndexStartupDelay")
         startupDelayUnit = DelayUnit(rawValue: defaults.string(forKey: "IndexStartupDelayUnit") ?? "") ?? .seconds
+        fullCheckInterval = FullCheckInterval(rawValue: defaults.string(forKey: "IndexFullCheckInterval") ?? "") ?? .off
         let storedRoots = defaults.stringArray(forKey: Self.rootsKey)
         let hasExistingIndex = FileManager.default.fileExists(atPath: initialIndexPath)
         let pendingSetup = storedRoots == nil && (defaults.bool(forKey: "IndexLocationSetupPending") || !hasExistingIndex)

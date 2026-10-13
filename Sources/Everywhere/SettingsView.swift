@@ -360,6 +360,13 @@ struct SettingsView: View {
 
     private var maintenanceSection: some View {
         Section {
+            Picker("Full checks", selection: $settings.fullCheckInterval) {
+                ForEach(IndexSettings.FullCheckInterval.allCases, id: \.self) { interval in
+                    Text(interval.rawValue.capitalized).tag(interval)
+                }
+            }
+            .disabled(!settings.indexingEnabled)
+            .onChange(of: settings.fullCheckInterval) { _ in indexService.checkScheduledFullCheck() }
             HStack {
                 Text(indexService.indexCountError ?? (indexService.hasLoadedIndexCount ? "\(indexService.indexedRows.formatted()) items in index" : "Loading saved index…"))
                     .foregroundStyle(.secondary)
@@ -379,6 +386,7 @@ struct SettingsView: View {
             Text("Maintenance")
         } footer: {
             VStack(alignment: .leading, spacing: 6) {
+                Text("Scheduled full checks are off by default. They check every indexed folder and update the existing index. Overdue checks run after startup catch-up or when indexing becomes idle, including when live updates are off. Monthly means every 30 days.")
                 Text("Unused database space is reclaimed automatically when indexing is idle and enough space can be recovered.")
                 if let error = indexService.lastError {
                     Text(error)

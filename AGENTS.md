@@ -32,6 +32,7 @@ Sources/EverywhereCore/        library (no UI)
   FSEventsMonitor.swift        FSEventStream wrapper + ChangeHandler (debounced ingest)
   IndexService.swift           serial scan jobs, startup replay, monitoring, published state
   IndexCheckpoint.swift        persistent journal cursor, baseline/config/volume validation
+  IndexedVolume.swift          indexed-volume discovery, device-relative paths and APFS firmlink mappings
   IndexingControl.swift        cooperative pause/resume/cancellation via NSCondition
   IndexSettings.swift          UserDefaults-backed settings (roots, exclusions, live toggle)
 Sources/Everywhere/            app (SwiftUI + AppKit)
@@ -151,17 +152,29 @@ and re-measure both size and speed.
 - Empty indexes rebuild. Existing indexes with a valid checkpoint replay missed events.
   Missing or invalid checkpoints trigger a full reconciliation, not an unconditional
   full walk on every launch.
-- The sidecar is `index.sqlite.checkpoint`, next to the DB. It records the event ID,
-  baseline time, DB device/inode identity, roots, exclusions, skip configuration, and
-  mounted-volume journal identities. Validation rejects event-ID rollback, identity or
-  configuration changes, and baselines at least seven days old. Seven days is a
-  startup validation threshold, not a scheduled timer.
+- The sidecar is `index.sqlite.checkpoint`, next to the DB. It records per-volume
+  processed cursors and archived-history markers, baseline time, DB device/inode identity,
+  roots, exclusions, skip configuration, and indexed-volume journal identities. Discover
+  only volumes containing indexed roots or reachable below them; respect exclusions and
+  APFS firmlink aliases. Do not compare unrelated mounted volumes. Validation rejects
+  archived-history rollback, identity or configuration changes, and baselines at least
+  seven days old. Archived history can lag delivered events; never compare a processed
+  cursor directly against the last archived event. Old host-wide checkpoints need one
+  full reconciliation. Seven days remains a startup validation threshold.
+- Persistent replay uses device-relative FSEvents streams and independent cursors.
+  Serialize reconciliation across those streams, and finish startup catch-up only after
+  every stream commits its HistoryDone batch. Volumes without a journal UUID cannot
+  replay history. Observe indexed-volume topology while live updates are enabled.
+- Optional daily/weekly/30-day full checks default to off and reconcile the existing index.
+  Evaluate elapsed time since the last full baseline at startup and while idle; do not
+  overlap, replace paused jobs, or run with indexing disabled. Live updates being off
+  does not disable an explicitly enabled full-check schedule.
 - Invalidate the checkpoint before a rebuild. Start monitoring before the baseline walk,
   suspend event application during that walk, then replay queued changes after it finishes.
   This covers changes made while the scan is in progress.
 - Advance a cursor only after its batch has been successfully reconciled. With deferred
   paths (below) the committed event ID is `min(unreconciled pending IDs) - 1`, never the
-  global max. Preserve retry work on errors. Ignore `HistoryDone` paths; the flag marks
+  volume's max. Preserve retry work on errors. Ignore `HistoryDone` paths; the flag marks
   completion of replay.
 - Live ingest batches under churn: `ChangeHandler` doubles its debounce (0.5 s → 8 s cap)
   while events keep arriving within `maxDebounce` of the previous flush and resets after
@@ -172,7 +185,7 @@ and re-measure both size and speed.
   `scanKnownSubdirectories: false`. Do not rely on directory modification times to prove
   an entire existing subtree is unchanged. SQLite currently stores whole-second mtimes.
 - `MustScanSubDirs`, root changes, and mount/unmount events require recursive handling.
-  Dropped events or wrapped IDs force scans of all configured roots. Never discard flags
+  Dropped events or wrapped IDs force scans of all roots covered by the affected stream. Never discard flags
   when using the journal for correctness.
 - `ChangeHandler` serializes ingest/application. Its stopped state rejects late callbacks.
   `FSEventsMonitor` owns a callback box rather than retaining itself through C context;

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.9.0
+
+- Replay FSEvents per indexed volume; unrelated drives no longer trigger full checks. Existing checkpoints receive one full check after upgrading.
+- Add optional daily, weekly, or monthly full checks in Indexing settings, off by default.
+
 ## 1.8.0
 
 - Speed up longer literal filename searches with byte-position skipping, and avoid walking the full cached sort order for selective queries. Synthetic one-million-file benchmarks measured selective searches at 6.9 ms versus 11.4 ms and OR queries at 11.4 ms versus 20.9 ms; see [search performance measurements](docs/SEARCH_PERFORMANCE.md).

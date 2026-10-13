@@ -4,7 +4,7 @@
 
 The Homebrew release includes native Apple Silicon (ARM64) and Intel (x86_64)
 binaries in one app for macOS 13 or later. Maintainers can find the automated
-build and tap setup in [How to release](../README.md#how-to-release).
+build and tap setup in [Release guide](RELEASING.md).
 
 Click **?** at the right of the search row for syntax tips. Click outside the tips or
 press **Escape** to dismiss them without changing your query. Choose **Full Search Guide**
@@ -371,20 +371,43 @@ from results after that folder's parent is checked.
 
 At startup, Everywhere catches up on changes recorded while it was closed. A valid saved
 checkpoint lets it check changed directories instead of walking every file again.
-The saved checkpoint stays before edits in folders waiting for a follow-up check,
-including when more edits arrive before the check. A failed checkpoint write preserves
-pending work for replay.
+Each indexed volume has its own saved position in its event history. Connecting or
+disconnecting an unrelated volume does not force a full check. Mounted volumes inside
+an indexed location are included unless excluded. With live updates enabled, Everywhere
+checks for changes to these volumes within about a minute and restarts monitoring as needed.
+Saved positions stay before edits in folders waiting for a follow-up check, including
+when more edits arrive before the check. A failed checkpoint write preserves pending
+work for replay. Startup catch-up finishes after every indexed volume has been checked.
 
 A full check can still occur when:
 
 - This is the first run, or there is no usable checkpoint.
 - Index locations, exclusions, or other index configuration have changed.
-- Volume or journal identities have changed, or event history cannot be trusted.
+- An indexed volume's journal identity has changed, or its event history cannot be trusted.
+- An indexed volume does not provide persistent event history.
 - The last full-scan baseline is at least seven days old when the app starts.
 - You explicitly rebuild the index.
+- An optional scheduled full check is due.
 
 The seven-day rule is checked at launch; it is not a scheduled weekly background job.
-An upgrade from a version without checkpoints needs one full check to establish its baseline.
+An upgrade from a version without per-volume checkpoints needs one full check to establish its baseline.
+
+### Schedule full checks
+
+Open **Settings… → Indexing → Maintenance → Full checks** and choose **Daily**,
+**Weekly**, or **Monthly** (every 30 days). The default is **Off**; journal replay remains
+the normal way to catch up.
+
+A scheduled full check walks all indexed folders and updates the existing index.
+It keeps saved results available and does not discard the index like **Rebuild Index**.
+The interval is measured from the last full baseline check, including checks needed
+for startup recovery. Checks run while Everywhere is open and **Enable indexing** is
+on, even when **Live Updates** is off. A check missed while the app was closed runs
+after the startup delay. Checks wait for active or paused indexing to finish; they do
+not replace or resume a paused scan. Disable indexing to stop scheduled checks as well.
+
+The seven-day startup safety rule remains separate: choosing **Off** or **Monthly**
+does not disable checks required to validate event history.
 
 ## Rebuild the index
 

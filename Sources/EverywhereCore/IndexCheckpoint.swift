@@ -1,8 +1,15 @@
 import Foundation
-import CoreServices
 
 struct IndexCheckpoint: Codable, Equatable {
-    var eventID: UInt64
+    struct VolumeCursor: Codable, Equatable {
+        var journalIdentity: String?
+        var eventID: UInt64
+        var journalEventID: UInt64
+        var roots: [String]
+        var canonicalRoots: [String]
+    }
+
+    var version = 2
     var scannedAt: Date
     var databaseIdentity: String
     var roots: [String]
@@ -10,7 +17,7 @@ struct IndexCheckpoint: Codable, Equatable {
     var namePatterns: [String]?
     var skipPathPrefixes: [String]
     var skipDirNames: [String]
-    var volumes: [String: String]
+    var volumeCursors: [String: VolumeCursor]
 
     static func identity(of path: String) -> String? {
         var info = stat()
@@ -18,24 +25,7 @@ struct IndexCheckpoint: Codable, Equatable {
         return "\(info.st_dev):\(info.st_ino)"
     }
 
-    static func volumeIdentities() -> [String: String] {
-        let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: []) ?? []
-        var result: [String: String] = [:]
-        for url in urls {
-            var info = stat()
-            guard stat(url.path, &info) == 0 else { continue }
-            if let uuid = FSEventsCopyUUIDForDevice(info.st_dev) {
-                result[url.path] = CFUUIDCreateString(nil, uuid) as String
-            } else {
-                result[url.path] = "device:\(info.st_dev)"
-            }
-        }
-        return result
-    }
-
-    init(eventID: UInt64, databasePath: String, config: IndexConfig, now: Date = Date(),
-         volumes: [String: String] = Self.volumeIdentities()) {
-        self.eventID = eventID
+    init(databasePath: String, config: IndexConfig, now: Date = Date(), volumes: [IndexedVolume]? = nil) {
         scannedAt = now
         databaseIdentity = Self.identity(of: databasePath) ?? ""
         roots = config.roots
@@ -43,18 +33,26 @@ struct IndexCheckpoint: Codable, Equatable {
         namePatterns = config.namePatterns
         skipPathPrefixes = config.skipPathPrefixes
         skipDirNames = config.skipDirNames
-        self.volumes = volumes
+        volumeCursors = Dictionary(uniqueKeysWithValues: (volumes ?? IndexedVolume.discover(config: config)).map {
+            ($0.path, VolumeCursor(journalIdentity: $0.journalIdentity, eventID: $0.journalEventID,
+                                  journalEventID: $0.journalEventID, roots: $0.roots, canonicalRoots: $0.canonicalRoots))
+        })
     }
 
-    func isValid(databasePath: String, config: IndexConfig, currentEventID: UInt64,
-                 now: Date = Date(), volumes: [String: String] = Self.volumeIdentities()) -> Bool {
-        eventID > 0 && eventID <= currentEventID
-            && now >= scannedAt && now.timeIntervalSince(scannedAt) < 7 * 24 * 60 * 60
-            && databaseIdentity == Self.identity(of: databasePath)
-            && roots == config.roots && exclusions == config.exclusions
-            && (namePatterns ?? []) == config.namePatterns
-            && skipPathPrefixes == config.skipPathPrefixes && skipDirNames == config.skipDirNames
-            && !volumes.isEmpty && self.volumes == volumes
+    func isValid(databasePath: String, config: IndexConfig, now: Date = Date(), volumes: [IndexedVolume]? = nil) -> Bool {
+        guard version == 2, now >= scannedAt, now.timeIntervalSince(scannedAt) < 7 * 24 * 60 * 60,
+              databaseIdentity == Self.identity(of: databasePath),
+              roots == config.roots, exclusions == config.exclusions,
+              (namePatterns ?? []) == config.namePatterns,
+              skipPathPrefixes == config.skipPathPrefixes, skipDirNames == config.skipDirNames else { return false }
+        let current = volumes ?? IndexedVolume.discover(config: config)
+        guard !current.isEmpty, Set(current.map(\.path)) == Set(volumeCursors.keys) else { return false }
+        return current.allSatisfy { volume in
+            guard let cursor = volumeCursors[volume.path], let identity = volume.journalIdentity else { return false }
+            return cursor.journalIdentity == identity && cursor.journalEventID <= volume.journalEventID
+                && cursor.eventID >= cursor.journalEventID && cursor.roots == volume.roots
+                && cursor.canonicalRoots == volume.canonicalRoots
+        }
     }
 
     static func load(databasePath: String) -> Self? {
@@ -81,10 +79,15 @@ final class IndexCheckpointWriter: @unchecked Sendable {
         self.databasePath = databasePath
     }
 
-    func commit(eventID: UInt64) throws {
+    func commit(volume: String, eventID: UInt64, journalEventID: UInt64) throws {
         lock.lock()
         defer { lock.unlock() }
-        checkpoint.eventID = max(checkpoint.eventID, eventID)
-        try checkpoint.save(databasePath: databasePath)
+        guard var cursor = checkpoint.volumeCursors[volume] else { return }
+        cursor.eventID = max(cursor.eventID, eventID)
+        cursor.journalEventID = max(cursor.journalEventID, min(cursor.eventID, journalEventID))
+        var next = checkpoint
+        next.volumeCursors[volume] = cursor
+        try next.save(databasePath: databasePath)
+        checkpoint = next
     }
 }

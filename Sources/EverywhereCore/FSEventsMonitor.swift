@@ -43,12 +43,33 @@ public final class FSEventsMonitor: @unchecked Sendable {
         })
     }
 
-    public init(roots: [String], since: UInt64 = UInt64(kFSEventStreamEventIdSinceNow),
+    public convenience init(roots: [String], since: UInt64 = UInt64(kFSEventStreamEventIdSinceNow),
                 latency: TimeInterval = 0.5, queue: DispatchQueue? = nil,
                 eventsSink: @escaping @Sendable ([FileSystemEvent]) -> Void) {
+        self.init(paths: roots, device: nil, since: since, latency: latency, queue: queue, eventsSink: eventsSink)
+    }
+
+    convenience init(volume: IndexedVolume, since: UInt64, latency: TimeInterval = 0.5,
+                     eventsSink: @escaping @Sendable ([FileSystemEvent]) -> Void) {
+        self.init(paths: [volume.relativeWatchPath], device: volume.device, since: since, latency: latency, queue: nil) { events in
+            eventsSink(events.flatMap { event in
+                if event.isHistoryDone { return [event] }
+                if event.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty {
+                    return volume.roots.map {
+                        FileSystemEvent(path: $0, id: event.id,
+                                        flags: event.flags | UInt32(kFSEventStreamEventFlagMustScanSubDirs))
+                    }
+                }
+                return [FileSystemEvent(path: volume.absolutePath(for: event.path), id: event.id, flags: event.flags)]
+            })
+        }
+    }
+
+    private init(paths: [String], device: dev_t?, since: UInt64, latency: TimeInterval,
+                 queue: DispatchQueue?, eventsSink: @escaping @Sendable ([FileSystemEvent]) -> Void) {
         self.queue = queue ?? DispatchQueue(label: "app.everywhere.fsevents", qos: .utility)
         callbackBox = CallbackBox(eventsSink)
-        guard !roots.isEmpty else { return }
+        guard !paths.isEmpty else { return }
         var context = FSEventStreamContext(
             version: 0, info: Unmanaged.passUnretained(callbackBox).toOpaque(),
             retain: { pointer in
@@ -72,7 +93,12 @@ public final class FSEventsMonitor: @unchecked Sendable {
         }
         let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes
                                             | kFSEventStreamCreateFlagWatchRoot | kFSEventStreamCreateFlagNoDefer)
-        stream = FSEventStreamCreate(kCFAllocatorDefault, callback, &context, roots as CFArray, since, latency, flags)
+        if let device {
+            stream = FSEventStreamCreateRelativeToDevice(kCFAllocatorDefault, callback, &context, device,
+                                                        paths as CFArray, since, latency, flags)
+        } else {
+            stream = FSEventStreamCreate(kCFAllocatorDefault, callback, &context, paths as CFArray, since, latency, flags)
+        }
     }
 
     deinit { stop() }
@@ -113,13 +139,14 @@ public final class ChangeHandler: @unchecked Sendable {
     private let db: Database
     private let config: IndexConfig
     private let rootPaths: [(path: String, canonical: String)]
+    private let recoveryRoots: [String]
     private let debounce: TimeInterval
     private let maxDebounce: TimeInterval
     private let pathCooldown: TimeInterval
     private let control: IndexingControl
     private let onCommit: @Sendable (UInt64, Bool, IndexerStats) throws -> Void
     private let onError: @Sendable (Error) -> Void
-    private let queue = DispatchQueue(label: "app.everywhere.changes", qos: .utility)
+    private let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Bool>()
     private var pending: [String: PendingChange] = [:]
     private var historyDoneID: UInt64 = 0
@@ -134,10 +161,13 @@ public final class ChangeHandler: @unchecked Sendable {
     public init(db: Database, config: IndexConfig, debounce: TimeInterval = 0.5,
                 maxDebounce: TimeInterval = 8, pathCooldown: TimeInterval = 5,
                 suspended: Bool = false, control: IndexingControl = IndexingControl(),
+                recoveryRoots: [String]? = nil, queue: DispatchQueue? = nil,
                 onCommit: @escaping @Sendable (UInt64, Bool, IndexerStats) throws -> Void = { _, _, _ in },
                 onError: @escaping @Sendable (Error) -> Void = { _ in }) {
         self.db = db
         self.config = config
+        self.recoveryRoots = recoveryRoots ?? config.roots
+        self.queue = queue ?? DispatchQueue(label: "app.everywhere.changes", qos: .utility)
         rootPaths = config.roots.sorted { $0.count > $1.count }.map {
             (Self.normalizedPath($0), Walk.canonicalPath($0))
         }
@@ -149,7 +179,7 @@ public final class ChangeHandler: @unchecked Sendable {
         self.onCommit = onCommit
         self.onError = onError
         debounceInterval = debounce
-        queue.setSpecific(key: queueKey, value: true)
+        self.queue.setSpecific(key: queueKey, value: true)
     }
 
     var effectiveDebounce: TimeInterval {
@@ -172,13 +202,19 @@ public final class ChangeHandler: @unchecked Sendable {
                     continue
                 }
                 if event.requiresFullScan {
-                    for root in config.roots { mergePending(root, id: event.id, recursive: true) }
+                    for root in recoveryRoots { mergePending(root, id: event.id, recursive: true) }
                     accepted = true
                 } else if let path = indexedPath(event.path), !config.ignores(path: path) {
                     mergePending(path, id: event.id, recursive: event.requiresRecursiveScan)
                     accepted = true
                 } else {
-                    continue
+                    let ancestor = Self.normalizedPath(event.path)
+                    for mapping in rootPaths where IndexedVolume.contains(ancestor, mapping.canonical)
+                        || IndexedVolume.contains(ancestor, mapping.path) {
+                        guard !config.ignores(path: mapping.path) else { continue }
+                        mergePending(mapping.path, id: event.id, recursive: true)
+                        accepted = true
+                    }
                 }
             }
             if accepted && !suspended { scheduleFlush() }
@@ -318,8 +354,8 @@ public final class ChangeHandler: @unchecked Sendable {
         scheduleFlush(after: delay)
     }
 
-    public func stop() {
-        control.cancel()
+    public func stop(cancelControl: Bool = true) {
+        if cancelControl { control.cancel() }
         queue.sync {
             self.flushItem?.cancel()
             self.flushItem = nil

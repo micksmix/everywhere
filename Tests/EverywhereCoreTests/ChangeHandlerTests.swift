@@ -162,6 +162,56 @@ final class ChangeHandlerTests: XCTestCase {
         XCTAssertEqual(try database.search(SearchRequest(text: "recover")).total, 1)
     }
 
+    func testDroppedEventsRecoverOnlyAffectedVolumeRoots() throws {
+        let other = tempDir.appendingPathComponent("other-volume")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        let config = IndexConfig(roots: [root.path, other.path])
+        let handler = ChangeHandler(db: database, config: config, recoveryRoots: [root.path])
+        defer { handler.stop() }
+        try Data([1]).write(to: root.appendingPathComponent("recover.txt"))
+        try Data([1]).write(to: other.appendingPathComponent("untouched.txt"))
+        handler.ingest(events: [FileSystemEvent(path: "", id: 80,
+                                               flags: UInt32(kFSEventStreamEventFlagUserDropped))])
+        handler.flushPendingNow()
+        XCTAssertEqual(try database.search(SearchRequest(text: "recover")).total, 1)
+        XCTAssertEqual(try database.search(SearchRequest(text: "untouched")).total, 0)
+    }
+
+    func testAncestorEventRecoversReplacedIndexedRoot() throws {
+        let nested = root.appendingPathComponent("nested")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let config = IndexConfig(roots: [nested.path])
+        try Data([1]).write(to: nested.appendingPathComponent("old.txt"))
+        try FilesystemIndexer(db: database, config: config).run()
+        try FileManager.default.removeItem(at: nested)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data([1]).write(to: nested.appendingPathComponent("new.txt"))
+        let handler = ChangeHandler(db: database, config: config)
+        defer { handler.stop() }
+        handler.ingest(events: [FileSystemEvent(path: root.path, id: 42)])
+        handler.flushPendingNow()
+        XCTAssertEqual(try database.search(SearchRequest(text: "old.txt")).total, 0)
+        XCTAssertEqual(try database.search(SearchRequest(text: "new.txt")).total, 1)
+    }
+
+    func testVolumeRecoveryUsesConfiguredAliasForParentPointers() throws {
+        let alias = tempDir.appendingPathComponent("alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: root)
+        let config = IndexConfig(roots: [alias.path])
+        try FilesystemIndexer(db: database, config: config).run()
+        let volume = try XCTUnwrap(IndexedVolume.discover(config: config).first)
+        XCTAssertEqual(volume.roots, [alias.path])
+        try Data([1]).write(to: root.appendingPathComponent("recovered.txt"))
+        let handler = ChangeHandler(db: database, config: config, recoveryRoots: volume.roots)
+        defer { handler.stop() }
+        handler.ingest(events: [FileSystemEvent(path: "", id: 90,
+                                               flags: UInt32(kFSEventStreamEventFlagKernelDropped))])
+        handler.flushPendingNow()
+        let result = try database.search(SearchRequest(text: "recovered.txt"))
+        XCTAssertEqual(result.total, 1)
+        XCTAssertEqual(result.entries.first?.path, alias.appendingPathComponent("recovered.txt").path)
+    }
+
     func testIngestIndexesCreatedFile() throws {
         try Data(repeating: 0, count: 4).write(to: root.appendingPathComponent("fresh.txt"))
         handler.ingest([root.path])

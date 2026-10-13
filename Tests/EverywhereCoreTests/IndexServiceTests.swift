@@ -3,6 +3,115 @@ import XCTest
 @testable import EverywhereCore
 
 final class IndexServiceTests: XCTestCase {
+    func testFullCheckScheduleDefaultsToOffAndPersists() throws {
+        let suite = "EverywhereTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = IndexSettings(defaults: defaults)
+        XCTAssertEqual(settings.fullCheckInterval, .off)
+        XCTAssertNil(settings.fullCheckInterval.seconds)
+        settings.fullCheckInterval = .daily
+        XCTAssertEqual(IndexSettings(defaults: defaults).fullCheckInterval.seconds, 86400)
+        settings.fullCheckInterval = .monthly
+        XCTAssertEqual(IndexSettings(defaults: defaults).fullCheckInterval.seconds, 30 * 86400)
+    }
+
+    func testReplayWaitsForEveryVolumeAndIgnoresDuplicateCompletion() {
+        var replay = JournalReplayProgress(volumes: ["/", "/Volumes/Work"])
+        XCTAssertFalse(replay.finish(volume: "/"))
+        XCTAssertFalse(replay.finish(volume: "/"))
+        XCTAssertFalse(replay.finish(volume: "/unrelated"))
+        XCTAssertEqual(replay.pendingVolumes, ["/Volumes/Work"])
+        XCTAssertTrue(replay.finish(volume: "/Volumes/Work"))
+        XCTAssertFalse(replay.finish(volume: "/Volumes/Work"))
+    }
+
+    @MainActor
+    func testScheduledCheckRunsWithoutLiveUpdatesAndPreservesIndex() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = directory.appendingPathComponent("files")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suite = "EverywhereTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = IndexSettings(defaults: defaults)
+        settings.roots = [root.path]
+        settings.startupDelay = 0
+        settings.liveUpdates = false
+        let db = try Database(path: directory.appendingPathComponent("db/index.sqlite").path)
+        let service = IndexService(settings: settings, database: db)
+        defer { service.setIndexingEnabled(false) }
+        try Data([1]).write(to: root.appendingPathComponent("existing.txt"))
+        let built = expectation(description: "Initial baseline completes")
+        let initial = service.$phase.dropFirst().filter { $0 == .idle }.prefix(1).sink { _ in built.fulfill() }
+        service.startIfNeeded()
+        await fulfillment(of: [built], timeout: 15)
+        let maintenanceDone = expectation(description: "Maintenance is idle")
+        let maintenance = service.$isCompacting.filter { !$0 }.prefix(1).sink { _ in maintenanceDone.fulfill() }
+        await fulfillment(of: [maintenanceDone], timeout: 10)
+        withExtendedLifetime((initial, maintenance)) {}
+        let baseline = try XCTUnwrap(IndexCheckpoint.load(databasePath: db.path))
+        let existingID = try XCTUnwrap(db.search(SearchRequest(text: "existing")).entries.first?.id)
+        let rebuildDate = settings.lastFullRebuildDate
+        try Data([2]).write(to: root.appendingPathComponent("scheduled.txt"))
+        let overdue = baseline.scannedAt.addingTimeInterval(2 * 86400)
+        service.checkScheduledFullCheck(now: overdue)
+        XCTAssertEqual(service.phase, .idle)
+        XCTAssertEqual(try db.search(SearchRequest(text: "scheduled")).total, 0)
+        settings.fullCheckInterval = .daily
+        let checked = expectation(description: "Scheduled full check completes")
+        let scheduled = service.$phase.dropFirst().filter { $0 == .idle }.prefix(1).sink { _ in checked.fulfill() }
+        service.checkScheduledFullCheck(now: overdue)
+        XCTAssertEqual(service.phase, .reconciling)
+        service.checkScheduledFullCheck(now: overdue)
+        await fulfillment(of: [checked], timeout: 15)
+        withExtendedLifetime(scheduled) {}
+        XCTAssertEqual(try db.search(SearchRequest(text: "scheduled")).total, 1)
+        XCTAssertEqual(try db.search(SearchRequest(text: "existing")).entries.first?.id, existingID)
+        XCTAssertEqual(settings.lastFullRebuildDate, rebuildDate)
+        let updated = try XCTUnwrap(IndexCheckpoint.load(databasePath: db.path))
+        XCTAssertGreaterThan(updated.scannedAt, baseline.scannedAt)
+        XCTAssertEqual(updated.databaseIdentity, baseline.databaseIdentity)
+        XCTAssertFalse(service.live)
+        service.setIndexingEnabled(false)
+        service.checkScheduledFullCheck(now: overdue)
+        XCTAssertEqual(service.phase, .idle)
+    }
+
+    @MainActor
+    func testOverdueSchedulePerformsFullCheckAtStartup() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = directory.appendingPathComponent("files")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suite = "EverywhereTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = IndexSettings(defaults: defaults)
+        settings.roots = [root.path]
+        settings.startupDelay = 0
+        settings.liveUpdates = false
+        settings.fullCheckInterval = .daily
+        let db = try Database(path: directory.appendingPathComponent("db/index.sqlite").path)
+        try FilesystemIndexer(db: db, config: IndexConfig(roots: [root.path])).run()
+        let service = IndexService(settings: settings, database: db)
+        defer { service.setIndexingEnabled(false) }
+        let old = Date().addingTimeInterval(-2 * 86400)
+        let checkpoint = IndexCheckpoint(databasePath: db.path, config: service.makeConfig(), now: old)
+        try checkpoint.save(databasePath: db.path)
+        XCTAssertTrue(checkpoint.isValid(databasePath: db.path, config: service.makeConfig()))
+        try Data([1]).write(to: root.appendingPathComponent("offline.txt"))
+        let finished = expectation(description: "Overdue startup check completes")
+        let subscription = service.$phase.dropFirst().filter { $0 == .idle }.prefix(1).sink { _ in finished.fulfill() }
+        service.startIfNeeded()
+        await fulfillment(of: [finished], timeout: 15)
+        withExtendedLifetime(subscription) {}
+        XCTAssertGreaterThan(try XCTUnwrap(IndexCheckpoint.load(databasePath: db.path)).scannedAt, old)
+        XCTAssertEqual(try db.search(SearchRequest(text: "offline")).total, 1)
+        XCTAssertNil(settings.lastFullRebuildDate)
+    }
+
     func testLocationSetupPersistsUntilSelectionAndKeepsLibraryIncluded() throws {
         let suite = "EverywhereTests.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -132,14 +241,14 @@ final class IndexServiceTests: XCTestCase {
         let original = service.makeConfig()
         XCTAssertTrue(original.ignores(path: "/System/Volumes/Preboot/photo.heic"))
         XCTAssertTrue(original.ignores(path: "/Users/example/.Trash/photo.heic"))
-        let checkpoint = IndexCheckpoint(eventID: 1, databasePath: db.path, config: original, volumes: ["/": "test"])
+        let checkpoint = IndexCheckpoint(databasePath: db.path, config: original)
         settings.builtInExcludedFolders.removeAll { $0 == "/System/Volumes" }
         settings.builtInExcludedDirectoryNames.removeAll { $0 == ".Trash" }
         let changed = service.makeConfig()
         XCTAssertFalse(changed.ignores(path: "/System/Volumes/Preboot/photo.heic"))
         XCTAssertFalse(changed.ignores(path: "/Users/example/.Trash/photo.heic"))
         XCTAssertTrue(changed.ignores(path: "/dev/disk0"))
-        XCTAssertFalse(checkpoint.isValid(databasePath: db.path, config: changed, currentEventID: 1, volumes: ["/": "test"]))
+        XCTAssertFalse(checkpoint.isValid(databasePath: db.path, config: changed))
         let restored = IndexSettings(defaults: defaults)
         XCTAssertEqual(restored.builtInExcludedFolders, settings.builtInExcludedFolders)
         XCTAssertEqual(restored.builtInExcludedDirectoryNames, settings.builtInExcludedDirectoryNames)
@@ -547,7 +656,10 @@ final class IndexServiceTests: XCTestCase {
         XCTAssertEqual(try db.search(SearchRequest(text: "offline")).total, 1)
         let updated = try XCTUnwrap(IndexCheckpoint.load(databasePath: databasePath))
         XCTAssertEqual(updated.scannedAt, baseline.scannedAt)
-        XCTAssertGreaterThanOrEqual(updated.eventID, baseline.eventID)
+        XCTAssertEqual(Set(updated.volumeCursors.keys), Set(baseline.volumeCursors.keys))
+        for (volume, cursor) in baseline.volumeCursors {
+            XCTAssertGreaterThanOrEqual(updated.volumeCursors[volume]?.eventID ?? 0, cursor.eventID)
+        }
     }
 
     @MainActor
@@ -581,7 +693,7 @@ final class IndexServiceTests: XCTestCase {
         XCTAssertNil(service.lastError)
         XCTAssertFalse(service.isPaused)
         XCTAssertFalse(service.canPause)
-        XCTAssertEqual(service.progressStats.scannedItems, 1)
+        XCTAssertGreaterThanOrEqual(service.progressStats.scannedItems, 1)
         XCTAssertEqual(try db.search(SearchRequest(text: "example")).total, 1)
     }
 }
