@@ -82,9 +82,12 @@ Simple name searches match literal fragments anywhere in a name: `port` finds
 The table loads 200 results initially and adds pages as you scroll. The status bar shows
 loaded rows, the full match count, and request-to-publication time (excluding table drawing).
 While a slow search is running, the status bar shows **Searching…** in place of the previous
-counts. Clearing the search with its **×** button or **⌘K** returns to recently modified items. This empty-search view
-uses modification order and respects the All/Files/Folders filter; use a nonempty query
-when applying other result sorting.
+counts. On opening, the empty-search view shows recently modified items, newest first,
+with the **Date Modified** sort arrow. Click any column heading to sort all indexed
+items by that column; click again to reverse the order. Sorting respects the kind and
+hidden-file filters and applies across all pages. Clearing a query with **×**, or pressing
+**⌘K** even when the field is empty, restores recent items. Your saved sort column and
+direction are used for typed searches; opening the app starts with recent items.
 
 Everywhere searches names and paths, not the text inside documents.
 

@@ -76,7 +76,7 @@ struct ResultsTableView: NSViewRepresentable {
         private weak var tableView: FSTableView?
         private var lastResults: [Entry] = []
         private var lastSelection: Set<Int64> = []
-        private var lastSortKey = ""
+        private var syncingSortDescriptors = false
         private var lastHighlightRequest = SearchRequest()
         private var highlights: SearchHighlights
 
@@ -168,6 +168,7 @@ struct ResultsTableView: NSViewRepresentable {
         }
 
         func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+            guard !syncingSortDescriptors else { return }
             viewModel.apply(sortDescriptors: tableView.sortDescriptors)
         }
 
@@ -374,7 +375,9 @@ struct ResultsTableView: NSViewRepresentable {
             let sortKey = viewModel.sortDescriptors.map { "\($0.key ?? "-"):\($0.ascending)" }.joined(separator: "|")
             let tableSortKey = table.sortDescriptors.map { "\($0.key ?? "-"):\($0.ascending)" }.joined(separator: "|")
             if sortKey != tableSortKey {
+                syncingSortDescriptors = true
                 table.sortDescriptors = viewModel.sortDescriptors
+                syncingSortDescriptors = false
             }
 
             if lastResults != viewModel.results || lastHighlightRequest != viewModel.displayedRequest {

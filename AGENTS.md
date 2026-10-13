@@ -97,7 +97,9 @@ and re-measure both size and speed.
 5. **Upsert conflict target is `(parent, name)`** (UNIQUE index). Renames are handled as
    delete+insert by the Reconciler, not UPDATE.
 6. **Search engine routing** (`Database.search`):
-   - empty text → `recentItems` (ORDER BY modified DESC, index-backed — do not make this sort)
+   - default empty text → `recentItems` (ORDER BY modified DESC, index-backed — do not make this sort).
+     An explicit column click may sort empty results through `nameSearch` with an all-name
+     query; opening and clearing the search retain the fast recent-items path.
    - regex + Match Path → `scanSearch` (streaming, regex per row)
    - regex alone → `regexSearch`: **LIKE-prefilter on the longest guaranteed literal run,
      then regex-filter candidates in Swift.** The prefilter must only use a literal that

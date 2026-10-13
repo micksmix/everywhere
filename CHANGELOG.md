@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.10.0
+
+- Fix column sorting in the initial empty-search view; clearing the search restores recent items.
+
 ## 1.9.0
 
 - Replay FSEvents per indexed volume; unrelated drives no longer trigger full checks. Existing checkpoints receive one full check after upgrading.

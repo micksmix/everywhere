@@ -682,7 +682,12 @@ public final class Database: @unchecked Sendable {
                                         pathIndex: { try self.pathSortIndex() })
             result = SearchResult(entries: [], total: 0, elapsedMS: 0)
         } else if request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            result = try recentItems(request)
+            if request.sortEmptyResults {
+                result = try nameSearch(request, useMemory: useMemory,
+                                        parsed: ParsedQuery(groups: [ParsedGroup(terms: [])]))
+            } else {
+                result = try recentItems(request)
+            }
         } else if useRegex && request.matchPath {
             result = try scanSearch(request, useRegex: true)
         } else if useRegex {
@@ -981,8 +986,8 @@ public final class Database: @unchecked Sendable {
         return (folders, included)
     }
 
-    private func nameSearch(_ request: SearchRequest, useMemory: Bool) throws -> SearchResult {
-        let query = NameQuery(request)
+    private func nameSearch(_ request: SearchRequest, useMemory: Bool, parsed: ParsedQuery? = nil) throws -> SearchResult {
+        let query = NameQuery(request, parsed: parsed)
         let limit = max(1, min(request.limit, 100_000))
         var matched: [BareRow] = []
         func consider(_ row: BareRow) {
@@ -995,7 +1000,7 @@ public final class Database: @unchecked Sendable {
         if useMemory {
             try refreshMemoryIndex()
             guard let memoryRows else { return SearchResult(entries: [], total: 0, elapsedMS: 0) }
-            let selected = try memoryRows.select(request: request, cancellation: searchCancellation,
+            let selected = try memoryRows.select(request: request, cancellation: searchCancellation, parsedQuery: parsed,
                                                  pathIndex: { try self.pathSortIndex() })
             let paths = try materializePaths(ids: selected.rows.map { $0.0.id })
             let entries = selected.rows.map { row, name in

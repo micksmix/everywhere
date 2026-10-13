@@ -7,6 +7,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     @Published var searchText: String = "" {
         didSet {
             if searchText != oldValue {
+                if isEmptySearch { sortEmptyResults = false }
                 if !navigatingHistory { history.resetNavigation() }
                 scheduleSearch()
             }
@@ -56,6 +57,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     @Published private(set) var showsSearchIndicator = false
     @Published private(set) var sortKey: SortKey = .name
     @Published private(set) var sortAscending = true
+    @Published private var sortEmptyResults = false
     @Published var focusToken = 0
 
     private let defaults: UserDefaults
@@ -114,14 +116,22 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     }
 
     var sortDescriptors: [NSSortDescriptor] {
-        let selector: Selector? = (sortKey == .name || sortKey == .path) ? #selector(NSString.compare(_:)) : nil
-        return [NSSortDescriptor(key: sortKey.rawValue, ascending: sortAscending, selector: selector)]
+        let recent = isEmptySearch && !sortEmptyResults
+        let key: SortKey = recent ? .modified : sortKey
+        let ascending = recent ? false : sortAscending
+        let selector: Selector? = (key == .name || key == .path) ? #selector(NSString.compare(_:)) : nil
+        return [NSSortDescriptor(key: key.rawValue, ascending: ascending, selector: selector)]
+    }
+
+    private var isEmptySearch: Bool {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     func apply(sortDescriptors: [NSSortDescriptor]) {
         guard let first = sortDescriptors.first,
               let key = first.key.flatMap(SortKey.init(rawValue:)) else { return }
-        let changed = key != sortKey || first.ascending != sortAscending
+        let changed = key != sortKey || first.ascending != sortAscending || (isEmptySearch && !sortEmptyResults)
+        if isEmptySearch { sortEmptyResults = true }
         sortKey = key
         sortAscending = first.ascending
         defaults.set(key.rawValue, forKey: "ResultsSortKey")
@@ -152,6 +162,8 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     }
 
     func clearSearch() {
+        sortEmptyResults = false
+        if searchText.isEmpty { scheduleSearch() }
         searchText = ""
         selection = []
         focusSearch()
@@ -168,6 +180,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
             wholeWord: wholeWord,
             sortKey: sortKey,
             ascending: sortAscending,
+            sortEmptyResults: sortEmptyResults,
             limit: 200
         )
     }

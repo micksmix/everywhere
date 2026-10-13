@@ -115,8 +115,9 @@ final class FilenameIndex {
     }
 
     func select(request: SearchRequest, cancellation: SearchCancellation?, filteredGroup: FilterQuery.Group? = nil,
+                parsedQuery: ParsedQuery? = nil,
                 pathIndex: () throws -> PathSortIndex) throws -> (rows: [(Row, String)], total: Int) {
-        let query = NameQuery(request, parsed: filteredGroup.map { ParsedQuery(groups: [ParsedGroup(terms: $0.terms)]) })
+        let query = NameQuery(request, parsed: filteredGroup.map { ParsedQuery(groups: [ParsedGroup(terms: $0.terms)]) } ?? parsedQuery)
         var reuse = false
         var identical = false
         if filteredGroup == nil, let previous = previousRequest,

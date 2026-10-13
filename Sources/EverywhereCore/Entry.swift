@@ -66,6 +66,7 @@ public struct SearchRequest: Equatable, Sendable {
     public var wholeWord: Bool
     public var sortKey: SortKey
     public var ascending: Bool
+    public var sortEmptyResults: Bool
     public var offset: Int
     public var limit: Int
 
@@ -78,6 +79,7 @@ public struct SearchRequest: Equatable, Sendable {
                 wholeWord: Bool = false,
                 sortKey: SortKey = .name,
                 ascending: Bool = true,
+                sortEmptyResults: Bool = false,
                 limit: Int = 10_000,
                 offset: Int = 0) {
         self.text = text
@@ -89,6 +91,7 @@ public struct SearchRequest: Equatable, Sendable {
         self.wholeWord = wholeWord
         self.sortKey = sortKey
         self.ascending = ascending
+        self.sortEmptyResults = sortEmptyResults
         self.limit = limit
         self.offset = offset
     }

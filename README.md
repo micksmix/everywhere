@@ -9,7 +9,7 @@ that indexes filenames and metadata, so you can find files without searching the
 
 - **Search as you type:** filename fragments, wildcards, regex, boolean queries, and path matching.
 - **Useful filters:** files or folders, extension, type, size, modification date, and folder scope.
-- **Native results:** sortable columns, saved layouts, highlighted matches, and Quick Look previews.
+- **Native results:** sortable columns even before searching, saved layouts, highlighted matches, and Quick Look previews.
 - **File actions:** open, reveal in Finder, Get Info, Open With, Open in Terminal, and copy names or paths.
 - **Easy access:** menu bar icon, configurable global shortcut (default **⌥Space**), and launch at login.
 - **Fresh results:** live updates, catch-up after the app was closed, and optional daily, weekly, or monthly full checks.

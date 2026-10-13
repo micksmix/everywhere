@@ -598,6 +598,75 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(Set(children.map(\.name)), ["a", "b.txt"])
     }
 
+    func testDefaultEmptyQueryKeepsRecentOrderWithoutLoadingCache() throws {
+        try tree.add(path: "/Alpha.txt", modified: 10)
+        try tree.add(path: "/Zulu.txt", modified: 30)
+        try tree.add(path: "/Middle.txt", modified: 20)
+        for memory in [false, true] {
+            let result = try db.search(SearchRequest(sortKey: .name, ascending: true), useMemory: memory)
+            XCTAssertEqual(result.entries.map(\.name), ["Zulu.txt", "Middle.txt", "Alpha.txt"])
+            XCTAssertEqual(result.cacheStatistics.fullLoads, 0)
+        }
+    }
+
+    func testEmptyQueryColumnSortingIncludesAllMatchesAcrossPages() throws {
+        try tree.add(path: "/zeta/Alpha.txt", size: 40, modified: 20)
+        try tree.add(path: "/alpha/Zulu.txt", size: 10, modified: 30)
+        try tree.add(path: "/alpha/Ångström.txt", size: 20, modified: 10)
+        try tree.add(path: "/beta/Middle\nline.txt", size: 30, modified: 20)
+        try tree.add(path: "/beta/.hidden.txt", size: 50, modified: 40)
+        let all = try db.search(SearchRequest()).entries
+        func ordered(_ entries: [Entry], key: SortKey, ascending: Bool) -> [Entry] {
+            entries.sorted { left, right in
+                let order: ComparisonResult
+                switch key {
+                case .name: order = left.name.compare(right.name, options: .caseInsensitive)
+                case .path: order = left.path.compare(right.path, options: .caseInsensitive)
+                case .size: order = left.size == right.size ? .orderedSame : (left.size < right.size ? .orderedAscending : .orderedDescending)
+                case .kind: order = left.isDirectory == right.isDirectory ? .orderedSame : (!left.isDirectory ? .orderedAscending : .orderedDescending)
+                case .modified: order = left.modified == right.modified ? .orderedSame : (left.modified < right.modified ? .orderedAscending : .orderedDescending)
+                }
+                if order == .orderedSame {
+                    if key != .name {
+                        let name = left.name.compare(right.name, options: .caseInsensitive)
+                        if name != .orderedSame { return name == .orderedAscending }
+                    }
+                    return left.id < right.id
+                }
+                return order == (ascending ? .orderedAscending : .orderedDescending)
+            }
+        }
+        for memory in [false, true] {
+            for text in ["", " \t "] {
+                for kind in KindFilter.allCases {
+                    for hidden in [false, true] {
+                        let matching = all.filter {
+                            (hidden || !$0.name.hasPrefix(".")) && (kind != .files || !$0.isDirectory)
+                                && (kind != .folders || $0.isDirectory)
+                        }
+                        for key in SortKey.allCases {
+                            for ascending in [true, false] {
+                                let expected = ordered(matching, key: key, ascending: ascending)
+                                var request = SearchRequest(text: text, kind: kind, includeHidden: hidden,
+                                                            matchPath: true, useRegex: true, wholeWord: true,
+                                                            sortKey: key, ascending: ascending, sortEmptyResults: true, limit: 2)
+                                var actual: [Entry] = []
+                                repeat {
+                                    request.offset = actual.count
+                                    let page = try db.search(request, useMemory: memory)
+                                    XCTAssertEqual(page.total, expected.count)
+                                    actual += page.entries
+                                    if page.entries.isEmpty { break }
+                                } while actual.count < expected.count
+                                XCTAssertEqual(actual, expected, "\(memory) \(text) \(kind) \(key) \(ascending)")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     func testEmptyQueryListsAll() throws {
         for i in 0..<100 {
             try tree.add(path: "/dir/file\(i).txt")
