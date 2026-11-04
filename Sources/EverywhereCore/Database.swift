@@ -547,8 +547,12 @@ public final class Database: @unchecked Sendable {
     }
 
     public func synchronizeIndexedRoots(roots: [String], previousRoots: [String], createMissingRoots: Bool = true) throws {
-        let ordered = Set(roots.map(Walk.normalizePath).filter { $0.hasPrefix("/") })
-            .sorted { $0.count == $1.count ? $0 < $1 : $0.count < $1.count }
+        let normalizedRoots: [String] = roots.map(Walk.normalizePath)
+        let uniqueRoots: Set<String> = Set(normalizedRoots.filter { $0.hasPrefix("/") })
+        let ordered: [String] = uniqueRoots.sorted { (left: String, right: String) -> Bool in
+            if left.count == right.count { return left < right }
+            return left.count < right.count
+        }
         var desired: [String] = []
         for path in ordered where !desired.contains(where: { IndexedVolume.contains($0, path) }) {
             desired.append(path)

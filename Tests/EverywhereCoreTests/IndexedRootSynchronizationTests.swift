@@ -27,6 +27,26 @@ final class IndexedRootSynchronizationTests: XCTestCase {
         }
     }
 
+    func testRootOrderingNormalizesDeduplicatesAndIgnoresRelativePaths() throws {
+        try fixture { database in
+            let nested = TestTree(db: database, rootPath: "/long/nested")
+            let kept = try nested.add(path: "/long/nested/kept.txt")
+            let nestedID = try database.ensureRootRow(path: "/long/nested")
+            let first = try TestTree(db: database, rootPath: "/aaaa").add(path: "/aaaa/first.txt")
+            let second = try TestTree(db: database, rootPath: "/bbbb").add(path: "/bbbb/second.txt")
+            let roots = ["/long/nested//", "/bbbb/", "relative", "", "/aaaa/", "/long///", "/long/nested", "/aaaa"]
+            for order in [roots, Array(roots.reversed())] {
+                try database.synchronizeIndexedRoots(roots: order, previousRoots: ["/long/nested", "/aaaa", "/bbbb"])
+                try assertFiles(["/long/nested/kept.txt": kept, "/aaaa/first.txt": first, "/bbbb/second.txt": second], in: database)
+                let parent = try XCTUnwrap(database.child(ofParent: 0, name: "/long"))
+                XCTAssertEqual(try database.child(ofParent: parent.id, name: "nested")?.id, nestedID)
+                XCTAssertNil(try database.child(ofParent: 0, name: "/long/nested"))
+                XCTAssertNil(try database.child(ofParent: 0, name: "relative"))
+                XCTAssertNil(try database.child(ofParent: 0, name: ""))
+            }
+        }
+    }
+
     func testBroadeningAttachesExistingRootWithoutChangingDescendantIDs() throws {
         try fixture { database in
             let tree = TestTree(db: database, rootPath: "/base/keep")
