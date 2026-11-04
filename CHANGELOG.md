@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.12.1
+
+- Fix CI compilation by simplifying indexed-root ordering.
+
 ## 1.12.0
 
 - Keep searchable offline indexes per location, with volume classification, availability indicators, and identity-safe reconnection.
