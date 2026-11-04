@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.12.0
+
+- Keep searchable offline indexes per location, with volume classification, availability indicators, and identity-safe reconnection.
+- Add named, pinned, and default search scopes combining folders with saved search expressions.
+- Record global shortcuts directly, including punctuation and special keys, with conflict and registration feedback.
+- Accelerate regex and folder-filtered searches while preserving Unicode matches and database size.
+
 ## 1.11.0
 
 - Reduce live-update overhead with direct file-edit checks, bounded batching, and fewer database writes and search refreshes.

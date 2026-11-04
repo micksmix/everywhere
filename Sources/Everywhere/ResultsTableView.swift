@@ -51,9 +51,13 @@ struct ResultsTableView: NSViewRepresentable {
         table.action = #selector(Coordinator.singleClicked(_:))
         table.doubleAction = #selector(Coordinator.doubleClicked(_:))
         table.onEnter = { [weak viewModel] in viewModel?.openSelection() }
-        table.previewItems = { [weak viewModel] in viewModel?.selectedEntries ?? [] }
+        table.previewItems = { [weak viewModel] in
+            guard let viewModel else { return [] }
+            return viewModel.selectedEntries.filter { viewModel.isAvailable($0) }
+        }
         viewModel.previewSelection = { [weak table, weak viewModel] in
-            viewModel?.rememberSearch()
+            guard let viewModel, viewModel.requireAvailable(viewModel.selectedEntries) else { return }
+            viewModel.rememberSearch()
             table?.togglePreview()
         }
         table.menu = context.coordinator.makeContextMenu()
@@ -77,6 +81,7 @@ struct ResultsTableView: NSViewRepresentable {
         private var lastResults: [Entry] = []
         private var lastSelection: Set<Int64> = []
         private var syncingSortDescriptors = false
+        private var lastAvailabilityRevision: UInt64 = 0
         private var lastHighlightRequest = SearchRequest()
         private var highlights: SearchHighlights
 
@@ -111,6 +116,7 @@ struct ResultsTableView: NSViewRepresentable {
 
             if let cell = tableView.makeView(withIdentifier: column.identifier, owner: self) as? NSTableCellView {
                 cell.textField?.attributedStringValue = highlightedText(for: entry, columnID: columnID)
+                cell.toolTip = viewModel.isAvailable(entry) ? entry.path : "Offline — reconnect this location to open the item.\n" + entry.path
                 if columnID == "name" { cell.imageView?.image = Self.icon(for: entry) }
                 return cell
             }
@@ -133,6 +139,7 @@ struct ResultsTableView: NSViewRepresentable {
 
             let cell = NSTableCellView()
             cell.identifier = column.identifier
+            cell.toolTip = viewModel.isAvailable(entry) ? entry.path : "Offline — reconnect this location to open the item.\n" + entry.path
             cell.textField = text
             if columnID == "name" {
                 let iconView = NSImageView(image: Self.icon(for: entry))
@@ -173,11 +180,13 @@ struct ResultsTableView: NSViewRepresentable {
         }
 
         private func highlightedText(for entry: Entry, columnID: String) -> NSAttributedString {
-            let value = Self.displayText(for: entry, columnID: columnID)
+            let offline = !viewModel.isAvailable(entry)
+            let value = Self.displayText(for: entry, columnID: columnID) + (offline && columnID == "name" ? " (Offline)" : "")
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineBreakMode = .byTruncatingMiddle
             paragraph.alignment = columnID == "size" || columnID == "modified" ? .right : .left
-            let result = NSMutableAttributedString(string: value, attributes: [.paragraphStyle: paragraph])
+            let result = NSMutableAttributedString(string: value, attributes: [.paragraphStyle: paragraph,
+                .foregroundColor: offline || columnID == "path" ? NSColor.secondaryLabelColor : NSColor.labelColor])
             guard columnID == "name" || columnID == "path" else { return result }
             for range in highlights.ranges(in: value, path: columnID == "path") {
                 result.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize), range: range)
@@ -285,12 +294,14 @@ struct ResultsTableView: NSViewRepresentable {
 
         func menuNeedsUpdate(_ menu: NSMenu) {
             let entries = targetEntries()
+            let available = entries.allSatisfy { viewModel.isAvailable($0) }
             for item in menu.items {
-                item.isEnabled = !entries.isEmpty
+                let copiesMetadata = item.action == #selector(copyNameFromMenu(_:)) || item.action == #selector(copyPathFromMenu(_:))
+                item.isEnabled = !entries.isEmpty && (available || copiesMetadata)
             }
             if let openWithItem = menu.item(withTitle: "Open With"), let submenu = openWithItem.submenu {
-                rebuildOpenWithMenu(submenu, for: entries.first)
-                openWithItem.isEnabled = entries.count == 1
+                rebuildOpenWithMenu(submenu, for: available ? entries.first : nil)
+                openWithItem.isEnabled = available && entries.count == 1
             }
         }
 
@@ -331,6 +342,7 @@ struct ResultsTableView: NSViewRepresentable {
         }
 
         @objc private func revealFromMenu(_ sender: Any?) {
+            guard viewModel.requireAvailable(targetEntries()) else { return }
             let urls = targetEntries().map { URL(fileURLWithPath: $0.path) }
             guard !urls.isEmpty else { return }
             NSWorkspace.shared.activateFileViewerSelecting(urls)
@@ -339,6 +351,7 @@ struct ResultsTableView: NSViewRepresentable {
         @objc private func previewFromMenu(_ sender: Any?) {
             guard let table = tableView else { return }
             let targets = targetEntries()
+            guard viewModel.requireAvailable(targets) else { return }
             viewModel.selection = Set(targets.map(\.id))
             table.togglePreview(entries: targets)
         }
@@ -352,6 +365,7 @@ struct ResultsTableView: NSViewRepresentable {
         }
 
         @objc private func openWithApp(_ sender: NSMenuItem) {
+            guard viewModel.requireAvailable(targetEntries()) else { return }
             guard let appPath = sender.representedObject as? String else { return }
             let appURL = URL(fileURLWithPath: appPath)
             let configuration = NSWorkspace.OpenConfiguration()
@@ -380,7 +394,8 @@ struct ResultsTableView: NSViewRepresentable {
                 syncingSortDescriptors = false
             }
 
-            if lastResults != viewModel.results || lastHighlightRequest != viewModel.displayedRequest {
+            if lastResults != viewModel.results || lastHighlightRequest != viewModel.displayedRequest || lastAvailabilityRevision != viewModel.locationAvailabilityRevision {
+                lastAvailabilityRevision = viewModel.locationAvailabilityRevision
                 if !highlights.isCompatible(with: viewModel.displayedRequest) {
                     highlights = SearchHighlights(request: viewModel.displayedRequest)
                 }

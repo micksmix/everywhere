@@ -12,6 +12,27 @@ struct IndexedVolume: Equatable, Sendable {
         var path: String
         var device: dev_t
         var mappings: [PathMapping]
+        var identity: String? = nil
+        var kind: IndexLocationKind = .local
+        var validationIdentity: String? = nil
+
+        func relativePath(for absolutePath: String) -> String? {
+            guard let mapping = mappings.filter({ IndexedVolume.contains($0.absolutePath, absolutePath) })
+                .max(by: { $0.absolutePath.count < $1.absolutePath.count }) else { return nil }
+            let suffix = absolutePath.dropFirst(mapping.absolutePath == "/" ? 1 : mapping.absolutePath.count)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            return [mapping.relativePath, suffix].filter { !$0.isEmpty }.joined(separator: "/")
+        }
+
+        func absolutePath(for relativePath: String) -> String {
+            let relative = relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if let mapping = mappings.filter({ !$0.relativePath.isEmpty && IndexedVolume.contains($0.relativePath, relative) })
+                .max(by: { $0.relativePath.count < $1.relativePath.count }) {
+                let suffix = relative.dropFirst(mapping.relativePath.count).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                return suffix.isEmpty ? mapping.absolutePath : Walk.joinPath(mapping.absolutePath, suffix)
+            }
+            return relative.isEmpty ? path : Walk.joinPath(path, relative)
+        }
     }
 
     var path: String
@@ -21,6 +42,7 @@ struct IndexedVolume: Equatable, Sendable {
     var roots: [String]
     var canonicalRoots: [String] = []
     var mappings: [PathMapping]
+    var preparedWatchPath: String? = nil
 
     static func contains(_ parent: String, _ child: String) -> Bool {
         parent == child || child.hasPrefix(parent == "/" ? "/" : parent + "/")
@@ -35,6 +57,27 @@ struct IndexedVolume: Equatable, Sendable {
         }
     }()
 
+    private static let unidentifiedSession = UUID().uuidString
+
+    static func networkIdentity(fileSystem: String, source: String) -> String? {
+        let type = fileSystem.lowercased()
+        guard !source.isEmpty else { return nil }
+        if source.hasPrefix("//") || source.contains("://") {
+            let text = source.hasPrefix("//") ? type + ":" + source : source
+            guard let components = URLComponents(string: text), let host = components.host, !host.isEmpty,
+                  !components.path.isEmpty, components.path != "/" else { return nil }
+            let port = components.port.map { ":\($0)" } ?? ""
+            let path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            return "share:\(type):\(host.lowercased())\(port)/\(path)"
+        }
+        if let separator = source.range(of: ":/") {
+            let host = source[..<separator.lowerBound].lowercased()
+            guard !host.isEmpty else { return nil }
+            return "share:\(type):\(host):\(source[separator.upperBound...])"
+        }
+        return nil
+    }
+
     static func mountedVolumes() -> [Mount] {
         var pointer: UnsafeMutablePointer<statfs>?
         let count = getmntinfo_r_np(&pointer, MNT_NOWAIT)
@@ -45,10 +88,62 @@ struct IndexedVolume: Equatable, Sendable {
             let path = withUnsafePointer(to: &info.f_mntonname) {
                 $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
             }
+            let source = withUnsafePointer(to: &info.f_mntfromname) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+            }
+            let fileSystem = withUnsafePointer(to: &info.f_fstypename) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(MFSTYPENAMELEN)) { String(cString: $0) }
+            }
+            let network = info.f_flags & UInt32(MNT_LOCAL) == 0
+                || ["smbfs", "nfs", "afpfs", "webdav"].contains(fileSystem.lowercased())
+            var kind: IndexLocationKind = network ? .network : .local
+            var identity = network ? networkIdentity(fileSystem: fileSystem, source: source) : nil
+            if !network {
+                let values = try? URL(fileURLWithPath: path).resourceValues(forKeys: [
+                    .volumeUUIDStringKey, .volumeIsRemovableKey, .volumeIsEjectableKey, .volumeIsInternalKey
+                ])
+                if values?.volumeIsRemovable == true || values?.volumeIsEjectable == true || values?.volumeIsInternal == false {
+                    kind = .removable
+                }
+                if let uuid = values?.volumeUUIDString, !uuid.isEmpty { identity = "uuid:" + uuid.lowercased() }
+                if identity == nil, let uuid = FSEventsCopyUUIDForDevice(info.f_fsid.val.0) {
+                    identity = "journal:" + (CFUUIDCreateString(nil, uuid) as String).lowercased()
+                }
+            }
+            if identity == nil { identity = "session:\(unidentifiedSession):\(info.f_fsid.val.0)" }
             var mappings = [PathMapping(relativePath: "", absolutePath: path)]
             if path == "/System/Volumes/Data" { mappings += firmlinks }
-            return Mount(path: path, device: info.f_fsid.val.0, mappings: mappings)
+            let validation = validationIdentity(info: &info, path: path)
+            return Mount(path: path, device: info.f_fsid.val.0, mappings: mappings, identity: identity, kind: kind,
+                         validationIdentity: validation)
         }
+    }
+
+    static func validationIdentity(containing path: String) -> String? {
+        var info = statfs()
+        guard statfs(path, &info) == 0 else { return nil }
+        return validationIdentity(info: &info, path: path)
+    }
+
+    private static func validationIdentity(info: inout statfs, path: String) -> String {
+        let fileSystem = withUnsafePointer(to: &info.f_fstypename) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MFSTYPENAMELEN)) { String(cString: $0) }
+        }
+        if info.f_flags & UInt32(MNT_LOCAL) == 0 || ["smbfs", "nfs", "afpfs", "webdav"].contains(fileSystem.lowercased()) {
+            let source = withUnsafePointer(to: &info.f_mntfromname) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+            }
+            return networkIdentity(fileSystem: fileSystem, source: source)
+                ?? "session:\(unidentifiedSession):\(info.f_fsid.val.0)"
+        }
+        if let uuid = FSEventsCopyUUIDForDevice(info.f_fsid.val.0) {
+            return "journal:" + (CFUUIDCreateString(nil, uuid) as String).lowercased()
+        }
+        if let values = try? URL(fileURLWithPath: path).resourceValues(forKeys: [.volumeUUIDStringKey]),
+           let uuid = values.volumeUUIDString, !uuid.isEmpty {
+            return "uuid:" + uuid.lowercased()
+        }
+        return "session:\(unidentifiedSession):\(info.f_fsid.val.0)"
     }
 
     static func device(containing path: String) -> dev_t? {
@@ -62,13 +157,14 @@ struct IndexedVolume: Equatable, Sendable {
         }
     }
 
-    static func discover(config: IndexConfig) -> [Self] {
-        select(config: config, mounts: mountedVolumes(), deviceForPath: device(containing:)).map { volume in
+    static func discover(config: IndexConfig, mounts: [Mount]? = nil) -> [Self] {
+        select(config: config, mounts: mounts ?? mountedVolumes(), deviceForPath: device(containing:)).map { volume in
             var volume = volume
             if let uuid = FSEventsCopyUUIDForDevice(volume.device) {
                 volume.journalIdentity = CFUUIDCreateString(nil, uuid) as String
                 volume.journalEventID = currentJournalEventID(device: volume.device)
             }
+            volume.preparedWatchPath = volume.relativeWatchPath
             return volume
         }
     }
@@ -78,7 +174,7 @@ struct IndexedVolume: Equatable, Sendable {
     }
 
     static func select(config: IndexConfig, mounts: [Mount], deviceForPath: (String) -> dev_t?) -> [Self] {
-        let roots = config.roots.filter { !config.ignores(path: $0) }.map {
+        let roots = config.roots.filter { !config.ignores(path: $0) && !config.knownUnavailableLocation(containing: $0) }.map {
             (path: Walk.normalizePath($0), canonical: Walk.canonicalPath($0))
         }
         var devices: [String: dev_t] = [:]
@@ -93,7 +189,8 @@ struct IndexedVolume: Equatable, Sendable {
                         let suffix = mapping.absolutePath.dropFirst(root.canonical == "/" ? 1 : root.canonical.count)
                             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                         let path = suffix.isEmpty ? root.path : Walk.joinPath(root.path, suffix)
-                        if !config.ignores(path: path), !config.ignores(path: mapping.absolutePath) { covered.insert(path) }
+                        if !config.ignores(path: path), !config.ignores(path: mapping.absolutePath),
+                           !config.knownUnavailableLocation(containing: path) { covered.insert(path) }
                     }
                 }
             }
@@ -120,6 +217,7 @@ struct IndexedVolume: Equatable, Sendable {
     }
 
     var relativeWatchPath: String {
+        if let preparedWatchPath { return preparedWatchPath }
         let paths = canonicalRoots.isEmpty ? roots.map(Walk.canonicalPath) : canonicalRoots
         let parents = paths.compactMap { root -> [Substring]? in
             guard let mapping = mappings.filter({ Self.contains($0.absolutePath, root) })

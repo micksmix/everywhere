@@ -27,7 +27,7 @@ struct SettingsView: View {
                     categoryRows([.general, .shortcuts, .terminal, .updates])
                 }
                 Section("Search & Index") {
-                    categoryRows([.performance, .indexing, .locations, .exclusions, .builtInExclusions, .storage, .fileAccess])
+                    categoryRows([.searchScopes, .performance, .indexing, .locations, .exclusions, .builtInExclusions, .storage, .fileAccess])
                 }
             }
             .listStyle(.sidebar)
@@ -83,6 +83,7 @@ struct SettingsView: View {
         case .shortcuts: shortcutSection
         case .terminal: terminalSection
         case .updates: updatesSection
+        case .searchScopes: SearchScopesSettingsView(store: viewModel.scopeSettings, indexSettings: settings)
         case .performance: performanceSection
         case .indexing:
             indexingSection
@@ -270,39 +271,33 @@ struct SettingsView: View {
                 get: { hotKeyManager.enabled },
                 set: { hotKeyManager.enabled = $0 }
             ))
-            Picker("Key", selection: $hotKeyManager.shortcut.keyCode) {
-                ForEach(GlobalShortcut.keys, id: \.code) { key in
-                    Text(key.name).tag(key.code)
-                }
-            }
+            .disabled(hotKeyManager.isRecording)
+            LabeledContent("Shortcut", value: hotKeyManager.shortcut?.localizedDisplayName ?? "Not set")
             HStack {
-                ForEach(GlobalShortcut.modifierOptions, id: \.flag) { modifier in
-                    Toggle(modifier.name, isOn: Binding(
-                        get: { hotKeyManager.shortcut.modifiers & modifier.flag != 0 },
-                        set: { selected in
-                            if selected {
-                                hotKeyManager.shortcut.modifiers |= modifier.flag
-                            } else {
-                                hotKeyManager.shortcut.modifiers &= ~modifier.flag
-                            }
-                        }
-                    ))
-                    .toggleStyle(.checkbox)
-                }
-            }
-            HStack {
-                Text("Shortcut: \(hotKeyManager.shortcut.displayName)")
+                ShortcutRecorder(manager: hotKeyManager)
+                    .frame(width: 200)
                 Spacer()
-                Button("Reset to ⌥ Space") { hotKeyManager.shortcut = .standard }
+                Button("Clear", action: hotKeyManager.clearShortcut)
+                    .disabled(hotKeyManager.shortcut == nil || hotKeyManager.isRecording)
+                Button("Reset to ⌥ Space", action: hotKeyManager.resetShortcut)
+                    .disabled(hotKeyManager.shortcut == .standard || hotKeyManager.isRecording)
+            }
+            if hotKeyManager.isRecording {
+                Text("Press your shortcut, then release the key to save. Press Escape or click elsewhere to cancel.")
+                    .foregroundStyle(.secondary)
+            }
+            if let error = hotKeyManager.registrationError {
+                Text(error).foregroundStyle(.red)
+                if !hotKeyManager.isRecording, hotKeyManager.enabled, hotKeyManager.shortcut != nil {
+                    Button("Retry Registration", action: hotKeyManager.retryRegistration)
+                }
             }
         } header: {
             Text("Global Shortcut")
         } footer: {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Choose a key and at least Control, Option, or Command. Changes are saved and take effect immediately. The menu bar icon also opens the search window.")
-                if let error = hotKeyManager.registrationError {
-                    Text(error).foregroundStyle(.red)
-                }
+                Text("Record a combination with Control, Option, or Command, including punctuation, arrow, and other special keys. Function keys can be used without modifiers; you may need to hold Fn to type them. Changes are saved immediately. Clear removes the shortcut; Reset restores ⌥ Space.")
+                Text("The global shortcut is suspended while recording. Some shortcuts are reserved by macOS or other apps and cannot be detected in advance. The menu bar icon always opens the search window.")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .multilineTextAlignment(.leading)
@@ -465,23 +460,46 @@ struct SettingsView: View {
 
     private var rootsSection: some View {
         Section {
-            ForEach(settings.roots, id: \.self) { root in
-                HStack(spacing: 8) {
-                    Image(systemName: "folder")
-                        .foregroundStyle(.secondary)
-                    Text(root)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer()
-                    Button {
-                        settings.roots.removeAll { $0 == root }
-                    } label: {
-                        Image(systemName: "minus.circle")
+            ForEach(settings.locations) { location in
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "folder")
+                            .foregroundStyle(.secondary)
+                        Text(location.path)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(location.path)
+                        Spacer()
+                        if let status = indexService.locationStatus(for: location.path) {
+                            Label(status.isAvailable ? "Available" : "Unavailable",
+                                  systemImage: status.isAvailable ? "checkmark.circle" : "externaldrive.badge.xmark")
+                                .font(.caption)
+                                .foregroundStyle(status.isAvailable ? Color.secondary : Color.orange)
+                        }
+                        Button {
+                            settings.roots = settings.locations.filter { $0.id != location.id }.map(\.path)
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove")
+                        .accessibilityLabel("Remove index location: \(location.path)")
                     }
-                    .buttonStyle(.borderless)
-                    .help("Remove")
-                    .accessibilityLabel("Remove location or exclusion")
+                    Picker("Storage type", selection: Binding<IndexLocationKind?>(
+                        get: { settings.location(for: location.path)?.kindOverride },
+                        set: { settings.setLocationKind($0, for: location.path) }
+                    )) {
+                        Text("Automatic (\(location.detectedKind.title))").tag(Optional<IndexLocationKind>.none)
+                        ForEach(IndexLocationKind.allCases, id: \.self) { kind in
+                            Text(kind.title).tag(Optional(kind))
+                        }
+                    }
+                    Toggle("Keep index when unavailable", isOn: Binding(
+                        get: { settings.location(for: location.path)?.keepIndexWhenUnavailable ?? true },
+                        set: { settings.setKeepIndexWhenUnavailable($0, for: location.path) }
+                    ))
                 }
+                .padding(.vertical, 4)
             }
             HStack {
                 TextField("Add a folder to index…", text: $newRoot)
@@ -494,7 +512,8 @@ struct SettingsView: View {
             Text("Index Locations")
         } footer: {
             VStack(alignment: .leading, spacing: 6) {
-                Text("These folders are indexed subject to the configured exclusions. Location changes take effect when the index is rebuilt.")
+                Text("Storage type is detected automatically; choose a type to override it. Unavailable locations keep searchable cached results by default. Turn off retention to remove their cached entries while disconnected.")
+                Text("Everywhere recognizes returning volumes and shares by identity, reuses their index, and reconciles changes. Reconnection checks run while indexing is enabled. Folder changes apply during the next index update or rebuild.")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .multilineTextAlignment(.leading)
@@ -750,6 +769,7 @@ private enum SettingsCategory: String, Hashable {
     case shortcuts = "Shortcuts"
     case terminal = "Terminal"
     case updates = "Updates"
+    case searchScopes = "Search Scopes"
     case performance = "Search Performance"
     case indexing = "Indexing"
     case locations = "Index Locations"
@@ -764,6 +784,7 @@ private enum SettingsCategory: String, Hashable {
         case .shortcuts: return "keyboard"
         case .terminal: return "terminal"
         case .updates: return "arrow.down.circle"
+        case .searchScopes: return "line.3.horizontal.decrease.circle"
         case .performance: return "speedometer"
         case .indexing: return "arrow.triangle.2.circlepath"
         case .locations: return "folder"

@@ -56,7 +56,17 @@ struct ContentView: View {
                         onEndEditing: { viewModel.rememberSearch() }) {
                 viewModel.openSelection()
             }
-            .frame(minWidth: 180, idealWidth: 260, maxWidth: .infinity)
+            .frame(minWidth: 160, idealWidth: 260, maxWidth: .infinity)
+            Picker("Search scope", selection: $viewModel.selectedScopeID) {
+                Text("All").tag(nil as UUID?)
+                ForEach(viewModel.scopes) { scope in
+                    Text((scope.isPinned ? "★ " : "") + scope.name).tag(Optional(scope.id))
+                }
+            }
+            .labelsHidden()
+            .frame(width: 135)
+            .help("Restrict results using a scope. Manage scopes in Settings → Search Scopes.")
+            .accessibilityLabel("Search scope")
             searchModifiers
             Picker("Filter", selection: $viewModel.kindFilter) {
                 Text("All").tag(KindFilter.all)
@@ -94,7 +104,7 @@ struct ContentView: View {
         if let error = viewModel.searchError {
             return error
         }
-        if viewModel.searchText.isEmpty {
+        if viewModel.searchText.isEmpty && viewModel.selectedScopeID == nil {
             if let error = indexService.indexCountError { return error }
             if !indexService.hasLoadedIndexCount { return "Loading saved index…" }
             if indexService.indexedRows > 0 {

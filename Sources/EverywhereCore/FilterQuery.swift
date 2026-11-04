@@ -7,6 +7,7 @@ struct FilterQuery {
         case size(NumericRange)
         case modified(NumericRange)
         case scope(String, recursive: Bool)
+        case locations([String])
     }
 
     struct Filter {
@@ -20,7 +21,7 @@ struct FilterQuery {
             case .directory(let directory): result = directory == isDirectory
             case .size(let range): result = !isDirectory && range.contains(Double(size))
             case .modified(let range): result = range.contains(modified)
-            case .scope: return true
+            case .scope, .locations: return true
             }
             return negated ? !result : result
         }
@@ -75,8 +76,8 @@ struct FilterQuery {
         SearchQueryParser.parse(text).groups.contains { $0.terms.contains { split($0) != nil || isFolderPrefix($0) } }
     }
 
-    init(_ text: String, now: Date = Date(), calendar: Calendar = .current) throws {
-        groups = try SearchQueryParser.parse(text).groups.map { group in
+    init(_ text: String, scope: SearchScope? = nil, now: Date = Date(), calendar: Calendar = .current) throws {
+        let activeGroups = try SearchQueryParser.parse(text).groups.map { group in
             var terms: [ParsedTerm] = []
             var filters: [Filter] = []
             for term in group.terms {
@@ -111,6 +112,20 @@ struct FilterQuery {
                 filters.append(Filter(predicate: predicate, negated: term.isNegated))
             }
             return Group(terms: terms, filters: filters)
+        }
+        if let scope {
+            let savedGroups = try FilterQuery(scope.expression, now: now, calendar: calendar).groups
+            guard activeGroups.count <= 256 / max(1, savedGroups.count) else {
+                throw DatabaseError.invalidQuery("The search and scope contain too many OR combinations.")
+            }
+            let locationFilters = scope.folders.isEmpty ? [] : [Filter(predicate: .locations(scope.folders), negated: false)]
+            groups = activeGroups.flatMap { active in
+                savedGroups.map { saved in
+                    Group(terms: active.terms + saved.terms, filters: active.filters + saved.filters + locationFilters)
+                }
+            }
+        } else {
+            groups = activeGroups
         }
     }
 

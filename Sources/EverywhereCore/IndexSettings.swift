@@ -3,6 +3,9 @@ import Combine
 
 public final class IndexSettings: ObservableObject {
     private static let rootsKey = "IndexRoots"
+    private static let locationsKey = "IndexLocations"
+    private static let bindingsKey = "IndexLocationBindings"
+    private static let retiredPathsKey = "IndexRetiredLocationPaths"
     private static let exclusionsKey = "IndexExclusions"
     private static let liveKey = "IndexLiveUpdates"
     private static let builtInFoldersKey = "IndexBuiltInExcludedFolders"
@@ -89,12 +92,72 @@ public final class IndexSettings: ObservableObject {
 
     @Published public private(set) var needsLocationSetup: Bool
 
+    @Published public private(set) var locations: [IndexLocation]
+    private(set) var locationBindings: [IndexLocationBinding]
+    private(set) var retiredLocationPaths: [String]
+
     @Published public var roots: [String] {
         didSet {
             defaults.set(roots, forKey: Self.rootsKey)
+            synchronizeLocations()
             needsLocationSetup = false
             defaults.set(false, forKey: "IndexLocationSetupPending")
         }
+    }
+
+    public func location(for path: String) -> IndexLocation? {
+        locations.first { $0.path == Walk.normalizePath(path) }
+    }
+
+    public func setLocationKind(_ kind: IndexLocationKind?, for path: String) {
+        guard let index = locations.firstIndex(where: { $0.path == Walk.normalizePath(path) }) else { return }
+        locations[index].kindOverride = kind
+        persistLocations()
+    }
+
+    public func setKeepIndexWhenUnavailable(_ keep: Bool, for path: String) {
+        guard let index = locations.firstIndex(where: { $0.path == Walk.normalizePath(path) }) else { return }
+        locations[index].keepIndexWhenUnavailable = keep
+        persistLocations()
+    }
+
+    private func synchronizeLocations() {
+        let normalized = roots.map(Walk.normalizePath)
+        let removed = locations.filter { !normalized.contains($0.path) }
+        retiredLocationPaths += removed.map(\.path)
+        retiredLocationPaths = Array(Set(retiredLocationPaths)).sorted()
+        locations = normalized.reduce(into: []) { result, path in
+            if !result.contains(where: { $0.path == path }) {
+                result.append(locations.first(where: { $0.path == path }) ?? IndexLocation(path: path))
+            }
+        }
+        let ids = Set(locations.map(\.id))
+        locationBindings.removeAll { !ids.contains($0.rootID) }
+        persistLocations()
+    }
+
+    func applyLocationResolution(_ resolution: IndexLocationResolution) {
+        locations = resolution.locations
+        locationBindings = resolution.bindings
+        let paths = locations.map(\.path)
+        if roots != paths { roots = paths }
+        persistLocations()
+    }
+
+    func recordRetiredLocations(_ paths: [String]) {
+        retiredLocationPaths = Array(Set(retiredLocationPaths + paths.map(Walk.normalizePath))).sorted()
+        defaults.set(retiredLocationPaths, forKey: Self.retiredPathsKey)
+    }
+
+    func acknowledgeRetiredLocations() {
+        retiredLocationPaths = []
+        defaults.set([], forKey: Self.retiredPathsKey)
+    }
+
+    private func persistLocations() {
+        defaults.set(try? JSONEncoder().encode(locations), forKey: Self.locationsKey)
+        defaults.set(try? JSONEncoder().encode(locationBindings), forKey: Self.bindingsKey)
+        defaults.set(retiredLocationPaths, forKey: Self.retiredPathsKey)
     }
 
     @Published public var exclusions: [String] {
@@ -143,7 +206,21 @@ public final class IndexSettings: ObservableObject {
         let pendingSetup = storedRoots == nil && (defaults.bool(forKey: "IndexLocationSetupPending") || !hasExistingIndex)
         needsLocationSetup = pendingSetup
         defaults.set(pendingSetup, forKey: "IndexLocationSetupPending")
-        roots = storedRoots ?? (pendingSetup ? [FileManager.default.homeDirectoryForCurrentUser.path] : ["/"])
+        let initialRoots = storedRoots ?? (pendingSetup ? [FileManager.default.homeDirectoryForCurrentUser.path] : ["/"])
+        let storedLocations = defaults.data(forKey: Self.locationsKey)
+            .flatMap { try? JSONDecoder().decode([IndexLocation].self, from: $0) } ?? []
+        let loadedLocations: [IndexLocation] = initialRoots.map(Walk.normalizePath).reduce(into: []) { result, path in
+            if !result.contains(where: { $0.path == path }) {
+                result.append(storedLocations.first(where: { $0.path == path }) ?? IndexLocation(path: path))
+            }
+        }
+        locations = loadedLocations
+        let locationIDs = Set(loadedLocations.map(\.id))
+        locationBindings = (defaults.data(forKey: Self.bindingsKey)
+            .flatMap { try? JSONDecoder().decode([IndexLocationBinding].self, from: $0) } ?? [])
+            .filter { locationIDs.contains($0.rootID) }
+        retiredLocationPaths = defaults.stringArray(forKey: Self.retiredPathsKey) ?? []
+        roots = initialRoots
         if storedRoots == nil && !pendingSetup {
             defaults.set(["/"], forKey: Self.rootsKey)
         }
@@ -161,5 +238,6 @@ public final class IndexSettings: ObservableObject {
         } else {
             liveUpdates = defaults.bool(forKey: Self.liveKey)
         }
+        persistLocations()
     }
 }

@@ -26,6 +26,8 @@ Choose **Everywhere → About Everywhere** for license information and the
 - [Use search modifiers](#use-search-modifiers)
 - [Search with patterns](#search-with-patterns)
 - [Filter by type, size, date, or folder](#filter-by-type-size-date-or-folder)
+- [Save and switch search scopes](#save-and-switch-search-scopes)
+- [Search disconnected volumes](#search-disconnected-volumes)
 - [Preview results and revisit searches](#preview-results-and-revisit-searches)
 - [Open, reveal, or copy results](#open-reveal-or-copy-results)
 - [Choose indexed folders](#choose-indexed-folders)
@@ -61,9 +63,17 @@ at login. The toggle refreshes when you return from System Settings. This option
 unavailable when running the unbundled executable with `make run`.
 
 Open **Everywhere → Settings… → Shortcuts** to toggle **Enable global shortcut** or change
-the shortcut. Choose Space, a letter, or a digit and select modifiers (at least Control,
-Option, or Command). Changes apply immediately and are saved across launches.
-Use **Reset to ⌥ Space** to restore the default. Keys refer to their US keyboard positions.
+the shortcut. Click **Record Shortcut**, then press and release the combination you want.
+Letters, numbers, punctuation, navigation keys, and function keys are supported. Include
+Control, Option, or Command unless using a function key; Shift alone is not enough.
+The captured combination is displayed using your keyboard layout and saved across launches.
+Use **Clear** to remove it or **Reset to ⌥ Space** to restore the default.
+
+Escape cancels recording. Switching away from the window also cancels; the global
+shortcut is temporarily suspended while recording. Known system and app-menu conflicts
+are reported before saving, and registration failures appear in Settings with a retry
+option. macOS cannot expose every other app's shortcuts, so some conflicts cannot be
+identified in advance.
 
 ## Find a file or folder
 
@@ -206,6 +216,37 @@ The supported filters are the ones listed here. Creation-date, Finder-tag, and f
 filters, fuzzy matching, and parenthesized boolean grouping are not supported.
 Unrecognized `name:value` tokens are treated as ordinary search text.
 
+## Save and switch search scopes
+
+Use the **All** dropdown immediately beside the search field to choose a scope.
+**All** searches every indexed location. A scope limits results without changing
+your typed query, search modifiers, or the index itself.
+
+1. Open **Settings → Search Scopes** and click **New Scope…**.
+2. Give it a unique name. Optionally add one or more indexed locations using
+   **Add Indexed Location**, **Choose…**, or an absolute/`~/` path. All descendants
+   of any selected folder are eligible; a similarly named sibling is not.
+3. Optionally enter a saved search expression. For example, **Recent PDFs** can use
+   `ext:pdf dm:pastmonth`, **Large Videos** can use `ext:mkv;mp4 size:>1GB`, and
+   **Code Projects** can use `ext:py;js;ts;go`.
+4. Pin frequent scopes to put them first in the dropdown. Click **Save**.
+5. Choose a default for the next app launch under **Default Scope**.
+
+Location restrictions and the saved expression are both required. Multiple locations
+are combined as OR; the saved expression is ANDed with your typed query, preserving
+OR branches on either side. For example, typing `invoice` in **Recent PDFs** finds
+only matching recent PDFs. In Regex mode, only the typed text is a regex; the saved
+expression still uses normal search syntax. Empty search text lists recent items
+within the scope; clicking a result heading applies your chosen sort instead.
+
+Use **Edit…** to rename or change a scope, or its minus button to delete it. Deleting
+the selected scope falls back to **All**. Adding a folder to a scope does not index
+it: select it under **Index Locations** first. Offline retained entries remain eligible.
+Saved expressions support the same syntax as normal searches, not Finder tags,
+`modified:<30d`, `AND`/`OR` words, or parenthesized groups. Use `dm:pastmonth`, spaces
+for AND, `|` for OR, or semicolon-separated extensions instead. A `scope:` query
+operator is not provided; use the dropdown.
+
 ## Preview results and revisit searches
 
 Matching query text appears in **bold** in name/path cells. Negative terms and
@@ -310,6 +351,37 @@ macOS has no public Full Disk Access status API. Everywhere uses a read-only acc
 without reading file contents. Missing probe files and ordinary filesystem permission
 errors are inconclusive and do not trigger the launch dialog. You can always open the
 access settings manually from **Settings → File Access**.
+
+## Search disconnected volumes
+
+In **Settings → Index Locations**, each configured location shows its availability
+and automatic **Local Disk**, **Network Disk**, or **Removable Disk** classification.
+Use **Storage type** to override the classification if automatic detection is unsuitable. Each location has a **Keep index
+when unavailable** option, enabled by default. A retained index stays searchable
+when a disk is unplugged or a share is offline, including through saved scopes.
+
+Offline rows are marked **(Offline)** and show their last indexed name, size, date,
+and path. **Copy Name** and **Copy Path** still work. Opening, revealing, Get Info,
+Terminal, Open With, and previews wait until the location is available again, avoiding
+filesystem calls that could block on a disconnected share.
+
+Availability is checked about every five seconds while the service is running, even
+with Live Updates off. Reconnecting a known volume reuses its existing entries and
+reconciles changes instead of clearing the whole index. Stable volume UUIDs and share
+identities also recognize moved mount points; old paths are relocated only after the
+same volume is identified. Folders selected in saved scopes follow identified mount
+moves; paths typed inside a search expression remain literal and may need editing.
+A different disk mounted at the same path does not inherit
+the old disk's cached results as if they were current. Where stable identity cannot
+be established, Everywhere falls back conservatively rather than assuming a match.
+
+Turning retention off removes that location's cached subtree once it is unavailable;
+a later reconnect must index it again. A rebuild preserves retained offline subtrees
+while refreshing available locations. With indexing disabled, availability still updates
+but no automatic scans or index removals run. Network filesystems without usable
+FSEvents refresh on reconnection, manual rebuild, or configured full checks; they do
+not get continuous file-level updates. Existing journal checkpoints receive one full
+reconciliation after this upgrade to establish the location-identity baseline.
 
 ## Exclude names
 
@@ -454,10 +526,11 @@ locations and exclusions can produce different result counts in other search app
 ### The global shortcut does nothing
 
 1. Confirm Everywhere is running; look for its menu-bar icon.
-2. Enable **Enable global shortcut** in Settings and check the configured shortcut.
-3. Read any registration error shown below that setting.
-4. If another app uses the shortcut, choose another key combination in Settings. Toggle Everywhere's
-   option off and back on to retry registration.
+2. Enable **Enable global shortcut** in **Settings → Shortcuts** and check the recorded shortcut.
+   If it was cleared, use **Record Shortcut** or **Reset to ⌥ Space**.
+3. Read any conflict or registration error shown below that setting; use **Retry Registration** when offered.
+4. If another app uses the shortcut, record a different combination. macOS cannot report
+   every other app's shortcut reservation.
 5. Quit duplicate or older copies, then launch the version you installed or just built.
 
 The menu-bar icon provides another way to bring the window forward.
@@ -646,8 +719,8 @@ Live folder updates reuse the existing indexed folder tree.
 ## Settings navigation
 
 Settings uses a category sidebar on the left and the selected controls on the right.
-Choose General, Shortcuts, Terminal, or Updates for app preferences. Search Performance,
-Indexing, Index Locations, Custom Exclusions, Built-in Exclusions, Index Storage, and
+Choose General, Shortcuts, Terminal, or Updates for app preferences. Search Scopes,
+Search Performance, Indexing, Index Locations, Custom Exclusions, Built-in Exclusions, Index Storage, and
 File Access each have a separate pane. Resize the window or scroll within a pane as needed.
 
 ## Updating Everywhere

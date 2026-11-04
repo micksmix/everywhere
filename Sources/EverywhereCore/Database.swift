@@ -460,6 +460,238 @@ public final class Database: @unchecked Sendable {
         return ancestor
     }
 
+    private func indexedRow(path: String, underRoot root: String) throws -> Entry? {
+        guard IndexedVolume.contains(root, path),
+              var row = try child(ofParent: 0, name: root == "/" ? "" : root) else { return nil }
+        for component in path.dropFirst(root == "/" ? 1 : root.count).split(separator: "/") {
+            guard row.isDirectory, let child = try child(ofParent: row.id, name: String(component)) else { return nil }
+            row = child
+        }
+        return row
+    }
+
+    private func indexedRow(path: String, roots: [String]) throws -> Entry? {
+        if let root = try child(ofParent: 0, name: path == "/" ? "" : path) { return root }
+        for root in Set(roots.map(Walk.normalizePath)).sorted(by: { $0.count < $1.count }) {
+            if let row = try indexedRow(path: path, underRoot: root) { return row }
+        }
+        return nil
+    }
+
+    private func indexedChildren(parent: Int64) throws -> [Entry] {
+        let sql = "SELECT id, '', name, is_dir, size, modified FROM entries WHERE parent = ?1"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(writer, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw DatabaseError.sql(Self.errorMessage(writer), sql: sql)
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, parent)
+        var rows: [Entry] = []
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return rows }
+            guard status == SQLITE_ROW else { throw DatabaseError.sql(Self.errorMessage(writer), sql: sql) }
+            rows.append(Self.entry(from: statement))
+        }
+    }
+
+    private func moveIndexedRow(id: Int64, parent: Int64, name: String) throws {
+        let sql = "UPDATE entries SET parent = ?1, name = ?2 WHERE id = ?3"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(writer, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw DatabaseError.sql(Self.errorMessage(writer), sql: sql)
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, parent)
+        Self.bindText(statement, 2, name)
+        sqlite3_bind_int64(statement, 3, id)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw DatabaseError.sql(Self.errorMessage(writer), sql: sql) }
+    }
+
+    private func createIndexedDirectory(parent: Int64, name: String) throws -> Int64 {
+        if let row = try child(ofParent: parent, name: name) {
+            if row.isDirectory { return row.id }
+            try deleteSubtree(id: row.id)
+        }
+        let id = nextID()
+        let sql = "INSERT INTO entries (id, parent, name, is_dir, size, modified) VALUES (?1, ?2, ?3, 1, 0, 0)"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(writer, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw DatabaseError.sql(Self.errorMessage(writer), sql: sql)
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, id)
+        sqlite3_bind_int64(statement, 2, parent)
+        Self.bindText(statement, 3, name)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw DatabaseError.sql(Self.errorMessage(writer), sql: sql) }
+        return id
+    }
+
+    private func mergeIndexedDirectory(from source: Int64, into destination: Int64) throws {
+        guard source != destination else { return }
+        for row in try indexedChildren(parent: source) {
+            if let existing = try child(ofParent: destination, name: row.name) {
+                if row.isDirectory && existing.isDirectory {
+                    try mergeIndexedDirectory(from: row.id, into: existing.id)
+                } else if row.isDirectory {
+                    try deleteSubtree(id: existing.id)
+                    try moveIndexedRow(id: row.id, parent: destination, name: row.name)
+                } else {
+                    try deleteSubtree(id: row.id)
+                }
+            } else {
+                try moveIndexedRow(id: row.id, parent: destination, name: row.name)
+            }
+        }
+        try deleteSubtree(id: source)
+    }
+
+    public func synchronizeIndexedRoots(roots: [String], previousRoots: [String], createMissingRoots: Bool = true) throws {
+        let ordered = Set(roots.map(Walk.normalizePath).filter { $0.hasPrefix("/") })
+            .sorted { $0.count == $1.count ? $0 < $1 : $0.count < $1.count }
+        var desired: [String] = []
+        for path in ordered where !desired.contains(where: { IndexedVolume.contains($0, path) }) {
+            desired.append(path)
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        memoryRequiresFullReload = true
+        try exec(writer, "BEGIN IMMEDIATE")
+        do {
+            let oldRoots = try indexedChildren(parent: 0).map { $0.name.isEmpty ? "/" : $0.name }
+            let lookupRoots = Set(oldRoots + previousRoots.map(Walk.normalizePath))
+            for path in desired {
+                let candidates = try lookupRoots.compactMap { try indexedRow(path: path, underRoot: $0) }
+                let existing = try child(ofParent: 0, name: path == "/" ? "" : path)
+                let id: Int64
+                if let row = existing, row.isDirectory {
+                    id = row.id
+                } else if let row = candidates.first(where: \.isDirectory) {
+                    id = row.id
+                } else {
+                    guard createMissingRoots || oldRoots.contains(where: { IndexedVolume.contains(path, $0) }) else { continue }
+                    id = try createIndexedDirectory(parent: 0, name: path == "/" ? "" : path)
+                }
+                for row in candidates where row.id != id {
+                    if row.isDirectory { try mergeIndexedDirectory(from: row.id, into: id) }
+                    else { try deleteSubtree(id: row.id) }
+                }
+                try moveIndexedRow(id: id, parent: 0, name: path == "/" ? "" : path)
+            }
+            let remaining = try indexedChildren(parent: 0).sorted { $0.name.count < $1.name.count }
+            for row in remaining {
+                let path = row.name.isEmpty ? "/" : row.name
+                if desired.contains(path) { continue }
+                guard let root = desired.first(where: { IndexedVolume.contains($0, path) }) else {
+                    try deleteSubtree(id: row.id)
+                    continue
+                }
+                let parentPath = (path as NSString).deletingLastPathComponent
+                var parent = try createIndexedDirectory(parent: 0, name: root == "/" ? "" : root)
+                for component in parentPath.dropFirst(root == "/" ? 1 : root.count).split(separator: "/") {
+                    parent = try createIndexedDirectory(parent: parent, name: String(component))
+                }
+                let name = (path as NSString).lastPathComponent
+                if let existing = try child(ofParent: parent, name: name), existing.id != row.id {
+                    if existing.isDirectory {
+                        try mergeIndexedDirectory(from: existing.id, into: row.id)
+                    } else {
+                        try deleteSubtree(id: existing.id)
+                    }
+                }
+                try moveIndexedRow(id: row.id, parent: parent, name: name)
+            }
+            try exec(writer, "COMMIT")
+        } catch {
+            try? exec(writer, "ROLLBACK")
+            throw error
+        }
+    }
+
+    @discardableResult
+    public func removeIndexedSubtree(path: String, roots: [String], preservingSubtreesAt paths: [String] = []) throws -> Bool {
+        let path = Walk.normalizePath(path)
+        lock.lock()
+        defer { lock.unlock() }
+        guard let row = try indexedRow(path: path, roots: roots) else { return false }
+        let retained = paths.map(Walk.normalizePath).filter { IndexedVolume.contains(path, $0) }
+        if retained.contains(path) { return false }
+        let ids = try retained.compactMap { try indexedRow(path: $0, roots: roots)?.id }
+        guard !ids.isEmpty else { try deleteSubtree(id: row.id); return true }
+        let anchors = ids.map(String.init).joined(separator: ",")
+        let sql = """
+            WITH RECURSIVE target(id) AS (
+                SELECT id FROM entries WHERE id = \(row.id)
+                UNION SELECT e.id FROM entries e JOIN target t ON e.parent = t.id
+            ), descendants(id) AS (
+                SELECT id FROM entries WHERE id IN (\(anchors))
+                UNION SELECT e.id FROM entries e JOIN descendants d ON e.parent = d.id
+            ), ancestors(id, parent) AS (
+                SELECT id, parent FROM entries WHERE id IN (\(anchors))
+                UNION SELECT e.id, e.parent FROM entries e JOIN ancestors a ON e.id = a.parent
+            ) DELETE FROM entries WHERE id IN (SELECT id FROM target)
+                AND id NOT IN (SELECT id FROM descendants UNION SELECT id FROM ancestors)
+            """
+        try exec(writer, sql)
+        return sqlite3_changes(writer) > 0
+    }
+
+    @discardableResult
+    public func relocateIndexedSubtree(from oldPath: String, to newPath: String, roots: [String], replacingEmptyDestination: Bool = false) throws -> Bool {
+        let oldPath = Walk.normalizePath(oldPath)
+        let newPath = Walk.normalizePath(newPath)
+        guard oldPath != newPath else { return false }
+        guard oldPath != "/", newPath != "/", !newPath.hasPrefix(oldPath + "/") else {
+            throw DatabaseError.invalidQuery("An indexed location cannot be moved into itself.")
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        let storedRoots = try indexedChildren(parent: 0).map { $0.name.isEmpty ? "/" : $0.name }
+        guard let row = try indexedRow(path: oldPath, roots: storedRoots + roots + [oldPath]), row.isDirectory else { return false }
+        let sources = try Set(storedRoots + roots.map(Walk.normalizePath)).compactMap {
+            try indexedRow(path: oldPath, underRoot: $0)
+        }
+        let destination = try indexedRow(path: newPath, roots: storedRoots + roots + [newPath])
+        if let destination {
+            guard replacingEmptyDestination, destination.isDirectory,
+                  try indexedChildren(parent: destination.id).isEmpty else {
+                throw DatabaseError.invalidQuery("The reconnected location is already indexed at its new path.")
+            }
+        }
+        let coveringRoots = roots.map(Walk.normalizePath).filter {
+            $0 != oldPath && $0 != newPath && ($0 == "/" || newPath.hasPrefix($0 + "/"))
+        }
+        memoryRequiresFullReload = true
+        try exec(writer, "BEGIN IMMEDIATE")
+        do {
+            for source in sources where source.id != row.id {
+                if source.isDirectory && row.isDirectory { try mergeIndexedDirectory(from: source.id, into: row.id) }
+                else { try deleteSubtree(id: source.id) }
+            }
+            if let destination { try deleteSubtree(id: destination.id) }
+            let parent: Int64
+            let name: String
+            if let root = coveringRoots.min(by: { $0.count < $1.count }) {
+                var directory = try createIndexedDirectory(parent: 0, name: root == "/" ? "" : root)
+                let parentPath = (newPath as NSString).deletingLastPathComponent
+                for component in parentPath.dropFirst(root == "/" ? 1 : root.count).split(separator: "/") {
+                    directory = try createIndexedDirectory(parent: directory, name: String(component))
+                }
+                parent = directory
+                name = (newPath as NSString).lastPathComponent
+            } else {
+                parent = 0
+                name = newPath
+            }
+            try moveIndexedRow(id: row.id, parent: parent, name: name)
+            try exec(writer, "COMMIT")
+        } catch {
+            try? exec(writer, "ROLLBACK")
+            throw error
+        }
+        return true
+    }
+
     public func beginBulkLoad() throws {
         lock.lock()
         defer { lock.unlock() }
@@ -624,6 +856,33 @@ public final class Database: @unchecked Sendable {
         return entries
     }
 
+    public func clear(preservingSubtreesAt paths: [String], roots: [String]) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let ids = try paths.compactMap { try indexedRow(path: Walk.normalizePath($0), roots: roots)?.id }
+        guard !ids.isEmpty else { try clear(); return }
+        let anchors = ids.map(String.init).joined(separator: ",")
+        let sql = """
+            WITH RECURSIVE descendants(id) AS (
+                SELECT id FROM entries WHERE id IN (\(anchors))
+                UNION SELECT e.id FROM entries e JOIN descendants d ON e.parent = d.id
+            ), ancestors(id, parent) AS (
+                SELECT id, parent FROM entries WHERE id IN (\(anchors))
+                UNION SELECT e.id, e.parent FROM entries e JOIN ancestors a ON e.id = a.parent
+            ) DELETE FROM entries WHERE id NOT IN (SELECT id FROM descendants UNION SELECT id FROM ancestors)
+            """
+        memoryRequiresFullReload = true
+        pendingMemoryChanges.removeAll()
+        try exec(writer, "BEGIN IMMEDIATE")
+        do {
+            try exec(writer, sql)
+            try exec(writer, "COMMIT")
+        } catch {
+            try? exec(writer, "ROLLBACK")
+            throw error
+        }
+    }
+
     public func clear() throws {
         lock.lock()
         defer { lock.unlock() }
@@ -745,6 +1004,13 @@ public final class Database: @unchecked Sendable {
             try memoryRows?.prepareSort(key: request.sortKey, ascending: request.ascending, cancellation: cancellation,
                                         pathIndex: { try self.pathSortIndex() })
             result = SearchResult(entries: [], total: 0, elapsedMS: 0)
+        } else if let scope = request.scope, !scope.isUnrestricted {
+            var scopedRequest = request
+            if request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !request.sortEmptyResults {
+                scopedRequest.sortKey = .modified
+                scopedRequest.ascending = false
+            }
+            result = try filteredSearch(scopedRequest, useMemory: useMemory)
         } else if request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if request.sortEmptyResults {
                 result = try nameSearch(request, useMemory: useMemory,
@@ -910,10 +1176,24 @@ public final class Database: @unchecked Sendable {
     }
 
     private func filteredSearch(_ request: SearchRequest, useMemory: Bool) throws -> SearchResult {
-        let query = try FilterQuery(request.text)
-        if useMemory, !request.matchPath, query.groups.count == 1, let group = query.groups.first,
+        let usesRegex = request.useRegex && !request.text.isEmpty
+        let query = try FilterQuery(usesRegex ? "" : request.text, scope: request.scope)
+        let usesSQLRecent = request.scope != nil && !request.sortEmptyResults &&
+            request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            query.groups.allSatisfy { group in
+                group.terms.isEmpty && !group.filters.contains { filter in
+                    if case .extensions = filter.predicate { return true }
+                    return false
+                }
+            }
+        if useMemory, !usesSQLRecent, !usesRegex, !request.matchPath, query.groups.count == 1, let group = query.groups.first,
            !group.terms.contains(where: { $0.hasPathSeparator }),
-           !group.filters.contains(where: { if case .scope = $0.predicate { return true }; return false }) {
+           !group.filters.contains(where: {
+               switch $0.predicate {
+               case .scope, .locations: return true
+               default: return false
+               }
+           }) {
             try refreshMemoryIndex()
             guard let memoryRows else { return SearchResult(entries: [], total: 0, elapsedMS: 0) }
             let selected = try memoryRows.select(request: request, cancellation: searchCancellation, filteredGroup: group,
@@ -925,7 +1205,36 @@ public final class Database: @unchecked Sendable {
             }
             return SearchResult(entries: entries, total: selected.total, elapsedMS: 0)
         }
+        struct ScopeKey: Hashable {
+            let paths: [String]
+            let recursive: Bool
+        }
         var scopes: [String] = []
+        var scopePredicates: [ScopeKey: String] = [:]
+        func scopePredicate(paths: [String], recursive: Bool) throws -> String {
+            let key = ScopeKey(paths: paths.sorted(), recursive: recursive)
+            if let predicate = scopePredicates[key] { return predicate }
+            var folders = Set<Int64>()
+            var included = Set<Int64>()
+            for path in paths {
+                let roots = try scopeRoots(path: path, recursive: recursive, matchCase: request.matchCase)
+                folders.formUnion(roots.folders)
+                included.formUnion(roots.included)
+            }
+            let parents = folders.sorted().map(String.init).joined(separator: ",")
+            let ids = included.sorted().map(String.init).joined(separator: ",")
+            guard recursive else {
+                let predicate = "parent IN (\(parents)) OR id IN (\(ids))"
+                scopePredicates[key] = predicate
+                return predicate
+            }
+            let name = "scope\(scopes.count)"
+            let anchors = folders.union(included).sorted().map(String.init).joined(separator: ",")
+            scopes.append("\(name)(id) AS (SELECT id FROM entries WHERE id IN (\(anchors)) UNION SELECT e.id FROM entries e JOIN \(name) s ON e.parent = s.id WHERE e.is_dir = 1)")
+            let predicate = "parent IN (SELECT id FROM \(name)) OR id IN (\(ids))"
+            scopePredicates[key] = predicate
+            return predicate
+        }
         var conditions: [String] = []
         for group in query.groups {
             var predicates: [String] = []
@@ -933,13 +1242,9 @@ public final class Database: @unchecked Sendable {
                 let predicate: String
                 switch filter.predicate {
                 case .scope(let path, let recursive):
-                    let roots = try scopeRoots(path: path, recursive: recursive, matchCase: request.matchCase)
-                    let parents = roots.folders.map(String.init).joined(separator: ",")
-                    let included = roots.included.map(String.init).joined(separator: ",")
-                    let name = "scope\(scopes.count)"
-                    let anchor = "SELECT id FROM entries WHERE parent IN (\(parents)) OR id IN (\(included))"
-                    scopes.append("\(name)(id) AS (\(anchor)" + (recursive ? " UNION ALL SELECT e.id FROM entries e JOIN \(name) s ON e.parent = s.id" : "") + ")")
-                    predicate = "id IN (SELECT id FROM \(name))"
+                    predicate = try scopePredicate(paths: [path], recursive: recursive)
+                case .locations(let paths):
+                    predicate = try scopePredicate(paths: paths, recursive: true)
                 case .directory(let directory): predicate = "is_dir = \(directory ? 1 : 0)"
                 case .size(let range): predicate = "is_dir = 0 AND (\(rangeSQL(range, column: "size")))"
                 case .modified(let range): predicate = rangeSQL(range, column: "modified")
@@ -949,11 +1254,18 @@ public final class Database: @unchecked Sendable {
             }
             if !request.matchPath {
                 for term in group.terms where !term.isNegated && !term.hasWildcards && !term.hasPathSeparator && term.text.utf8.allSatisfy({ $0 > 0 && $0 < 128 }) {
-                    let literal = term.text.lowercased().replacingOccurrences(of: "'", with: "''")
-                    predicates.append("(instr(lower(name), '\(literal)') > 0 OR name GLOB '*[^ -~]*')")
+                    let literal = term.text.replacingOccurrences(of: "'", with: "''")
+                        .replacingOccurrences(of: "\\", with: "\\\\")
+                        .replacingOccurrences(of: "%", with: "\\%")
+                        .replacingOccurrences(of: "_", with: "\\_")
+                    predicates.append("(name LIKE '%\(literal)%' ESCAPE '\\' OR length(CAST(name AS BLOB)) != length(name))")
                 }
             }
             conditions.append(predicates.isEmpty ? "1" : predicates.joined(separator: " AND "))
+        }
+        let cte = scopes.isEmpty ? "" : "WITH RECURSIVE " + scopes.joined(separator: ", ") + " "
+        if usesSQLRecent {
+            return try recentItems(request, cte: cte, predicate: conditions.map { "(\($0))" }.joined(separator: " OR "))
         }
         let matchers = query.groups.map { group in
             group.terms.map { term -> (NameQuery, Bool, String?, Bool) in
@@ -964,8 +1276,7 @@ public final class Database: @unchecked Sendable {
         }
         let columns = conditions.enumerated().map { "(\($0.element)) AS g\($0.offset)" }.joined(separator: ", ")
         let allowed = conditions.indices.map { "g\($0)" }.joined(separator: " OR ")
-        let sql = (scopes.isEmpty ? "" : "WITH RECURSIVE " + scopes.joined(separator: ", ") + " ") +
-            "SELECT id, parent, name, is_dir, size, modified, \(columns) FROM entries WHERE name != '' AND (\(allowed))"
+        let sql = cte + "SELECT id, parent, name, is_dir, size, modified, \(columns) FROM entries WHERE name != '' AND (\(allowed))"
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(searchReader, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
             throw DatabaseError.sql(Self.errorMessage(searchReader), sql: sql)
@@ -977,6 +1288,10 @@ public final class Database: @unchecked Sendable {
             guard request.includeHidden || !row.name.hasPrefix("."),
                   request.kind != .files || !row.isDir, request.kind != .folders || row.isDir else { continue }
             var path: String?
+            if usesRegex {
+                if request.matchPath { path = try resolvePath(for: row.id) }
+                guard regexBox.matches(request.matchPath ? path! : row.name) else { continue }
+            }
             for (index, group) in query.groups.enumerated() {
                 guard sqlite3_column_int(statement, Int32(6 + index)) != 0,
                       group.filters.allSatisfy({ $0.matches(name: row.name, isDirectory: row.isDir, size: row.size, modified: row.modified) }) else { continue }
@@ -1136,8 +1451,9 @@ public final class Database: @unchecked Sendable {
             .joined(separator: " AND ")
     }
 
-    private func recentItems(_ request: SearchRequest) throws -> SearchResult {
-        var sql = "SELECT id, parent, name, is_dir, size, modified FROM entries WHERE name != ''"
+    private func recentItems(_ request: SearchRequest, cte: String = "", predicate: String? = nil) throws -> SearchResult {
+        var sql = cte + "SELECT id, parent, name, is_dir, size, modified FROM entries WHERE name != ''"
+        if let predicate { sql += " AND (\(predicate))" }
         if !request.includeHidden {
             sql += " AND substr(name, 1, 1) != '.'"
         }
@@ -1228,7 +1544,7 @@ public final class Database: @unchecked Sendable {
             if let memoryRows {
                 let run = Self.longestGuaranteedLiteralRun(in: request.text)
                 let literal: String? = run.flatMap { candidate in
-                    (candidate.count >= 3 && candidate.allSatisfy(\.isASCII)) ? candidate.lowercased() : nil
+                    (candidate.count >= 3 && candidate.allSatisfy(\.isASCII)) ? candidate : nil
                 }
                 let box = regexBox
                 let selected = try memoryRows.selectRegex(request: request, cancellation: searchCancellation, literal: literal,
@@ -1250,7 +1566,8 @@ public final class Database: @unchecked Sendable {
            literal.count >= 3,
            literal.allSatisfy({ $0.isASCII }) {
             let escaped = Self.escapeLike(literal.lowercased())
-            var sql = "SELECT id, parent, name, is_dir, size, modified FROM entries WHERE lower(name) LIKE '%\(escaped)%' ESCAPE '\\'"
+            let unicodeFallback = request.matchCase ? "" : " OR length(CAST(name AS BLOB)) != length(name)"
+            var sql = "SELECT id, parent, name, is_dir, size, modified FROM entries WHERE (name LIKE '%\(escaped)%' ESCAPE '\\'\(unicodeFallback))"
             if !request.includeHidden {
                 sql += " AND substr(name, 1, 1) != '.'"
             }

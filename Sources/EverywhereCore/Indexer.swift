@@ -11,6 +11,54 @@ public struct IndexConfig: Sendable {
     public var skipDirNames: [String]
     public var batchSize: Int
     public var useBulkReader: Bool
+    var locationAccess: [IndexLocationAccess] = []
+    var locationIdentities: [String] = []
+    var defaultSkipPathPrefixes: [String]? = nil
+    var explicitSkipPathPrefixes: [String] = []
+    var canonicalRootPaths: [String] = []
+
+    func preparingFilesystemPaths() -> Self {
+        guard let defaultSkipPathPrefixes else { return self }
+        var result = self
+        let canonicalRoots = roots.map(Walk.canonicalPath)
+        result.canonicalRootPaths = canonicalRoots
+        let defaults = defaultSkipPathPrefixes.filter { prefix in
+            !canonicalRoots.contains { IndexedVolume.contains(prefix, $0) }
+        }
+        let explicit = explicitSkipPathPrefixes.flatMap { [Walk.normalizePath($0), Walk.canonicalPath($0)] }
+        var seen = Set<String>()
+        result.skipPathPrefixes = (defaults + explicit).filter { seen.insert($0).inserted }
+        return result
+    }
+
+    func hasSameLogicalConfiguration(as other: Self) -> Bool {
+        roots == other.roots && exclusions == other.exclusions && namePatterns == other.namePatterns
+            && skipDirNames == other.skipDirNames && defaultSkipPathPrefixes == other.defaultSkipPathPrefixes
+            && explicitSkipPathPrefixes == other.explicitSkipPathPrefixes
+            && (defaultSkipPathPrefixes != nil || skipPathPrefixes == other.skipPathPrefixes)
+    }
+
+    func knownUnavailableLocation(containing path: String) -> Bool {
+        guard let location = locationAccess.first(where: { IndexedVolume.contains($0.path, path) }) else { return false }
+        return !location.isAvailable
+    }
+
+    func validateLocation(at path: String) throws -> Bool {
+        guard let location = locationAccess.first(where: { IndexedVolume.contains($0.path, path) }) else { return true }
+        guard location.isAvailable else { return false }
+        guard location.permits(path) else { throw IndexLocationUnavailable(path: location.path) }
+        return true
+    }
+
+    func protectsUnavailableDescendant(of path: String) -> Bool {
+        locationAccess.contains { !$0.isAvailable && IndexedVolume.contains(path, $0.path) }
+    }
+
+    func validateLocationBoundary(at path: String) throws -> Bool {
+        if knownUnavailableLocation(containing: path) { return false }
+        guard locationAccess.contains(where: { $0.path == path }) else { return true }
+        return try validateLocation(at: path)
+    }
 
     public init(roots: [String],
                 exclusions: [String] = [],
@@ -473,9 +521,17 @@ public final class FilesystemIndexer: IndexEngine {
         if isCancelled() { return }
         var seenRootIDs = Set<Int64>()
         var level: [DirPairCollector.Root] = []
-        for root in config.roots {
+        var availableRoots: [String] = []
+        for root in config.roots.map(Walk.normalizePath) {
             if isCancelled() { return }
             if config.ignores(path: root) { continue }
+            if try config.validateLocation(at: root) { availableRoots.append(root) }
+        }
+        let roots = availableRoots.filter { candidate in
+            !availableRoots.contains { $0 != candidate && IndexedVolume.contains($0, candidate) }
+        }
+        for root in roots {
+            if isCancelled() { return }
             let id = try db.ensureRootRow(path: root)
             guard seenRootIDs.insert(id).inserted else { continue }
             level.append(DirPairCollector.Root(path: Walk.normalizePath(root), id: id))
@@ -503,9 +559,13 @@ public final class FilesystemIndexer: IndexEngine {
             bump { $0.scannedDirectories += 1 }
             reportProgress(progress)
         }
+        do { guard try config.validateLocation(at: directory) else { return } }
+        catch { recordError(error); return }
         var items: [DirectoryReader.Item] = []
         items.reserveCapacity(128)
         let ok = DirectoryReader.read(directory, preferBulk: config.useBulkReader, out: &items)
+        do { guard try config.validateLocation(at: directory) else { return } }
+        catch { recordError(error); return }
         guard ok else {
             bump { $0.skipped += 1 }
             return
@@ -518,6 +578,8 @@ public final class FilesystemIndexer: IndexEngine {
             if config.ignores(name: item.name) { continue }
             let path = Walk.joinPath(directory, item.name)
             if config.ignoresPrefix(of: path) { continue }
+            do { guard try config.validateLocationBoundary(at: path) else { continue } }
+            catch { recordError(error); return }
             let id = try? takeID()
             guard let id else { return }
             if item.isDir {
@@ -563,6 +625,7 @@ public final class Reconciler: IndexEngine {
         var level: [DirPairCollector.Root] = []
         for root in config.roots {
             if isCancelled() { return }
+            guard try config.validateLocation(at: root) else { continue }
             if config.ignores(path: root) {
                 if let id = try db.ensureDirectoryRow(path: root, roots: indexRoots) {
                     try db.deleteSubtree(id: id)
@@ -644,6 +707,7 @@ public final class Reconciler: IndexEngine {
         }
         let existing: [Entry]
         do {
+            guard try config.validateLocation(at: directory) else { return }
             existing = try db.children(ofParent: dirID)
         } catch {
             recordError(error)
@@ -654,14 +718,17 @@ public final class Reconciler: IndexEngine {
         var items: [DirectoryReader.Item] = []
         items.reserveCapacity(128)
         let ok = readDirectory(directory, config.useBulkReader, &items)
+        let failure = errno
+        do { guard try config.validateLocation(at: directory) else { return } }
+        catch { recordError(error); return }
         guard ok else {
-            let failure = errno
             bump { $0.skipped += 1 }
             var info = stat()
             let found = lstat(directory, &info) == 0
             let missing = !found && (errno == ENOENT || errno == ENOTDIR)
             if missing || (found && failure == ENOTDIR) {
                 do {
+                    guard !config.protectsUnavailableDescendant(of: directory) else { return }
                     try db.deleteSubtree(id: dirID)
                     bump { $0.deleted += existing.count }
                 } catch {
@@ -681,6 +748,12 @@ public final class Reconciler: IndexEngine {
             if config.ignores(name: item.name) { continue }
             let path = Walk.joinPath(directory, item.name)
             if config.ignoresPrefix(of: path) { continue }
+            do {
+                guard try config.validateLocationBoundary(at: path) else {
+                    byName.removeValue(forKey: item.name)
+                    continue
+                }
+            } catch { recordError(error); return }
             let row = byName.removeValue(forKey: item.name)
             let unchanged = row.map { stored in
                 stored.isDirectory == item.isDir
@@ -696,6 +769,7 @@ public final class Reconciler: IndexEngine {
                 let indexRow = IndexRow(id: id, parent: dirID, name: item.name, isDir: item.isDir, size: item.size, modified: item.modified)
                 do {
                     if let row, row.isDirectory && !item.isDir {
+                        guard !config.protectsUnavailableDescendant(of: path) else { continue }
                         try db.deleteSubtree(id: row.id)
                         bump { $0.deleted += 1 }
                     }
@@ -717,9 +791,13 @@ public final class Reconciler: IndexEngine {
 
         let vanished = byName
         if !vanished.isEmpty {
-            for (_, entry) in vanished {
+            for (name, entry) in vanished {
                 if isCancelled() { return }
                 do {
+                    let path = Walk.joinPath(directory, name)
+                    guard try config.validateLocation(at: directory),
+                          try config.validateLocationBoundary(at: path),
+                          !config.protectsUnavailableDescendant(of: path) else { continue }
                     if entry.isDirectory {
                         try db.deleteSubtree(id: entry.id)
                     } else {

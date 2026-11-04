@@ -67,6 +67,7 @@ public struct SearchRequest: Equatable, Sendable {
     public var sortKey: SortKey
     public var ascending: Bool
     public var sortEmptyResults: Bool
+    public var scope: SearchScope?
     public var offset: Int
     public var limit: Int
 
@@ -81,7 +82,8 @@ public struct SearchRequest: Equatable, Sendable {
                 ascending: Bool = true,
                 sortEmptyResults: Bool = false,
                 limit: Int = 10_000,
-                offset: Int = 0) {
+                offset: Int = 0,
+                scope: SearchScope? = nil) {
         self.text = text
         self.kind = kind
         self.includeHidden = includeHidden
@@ -92,6 +94,7 @@ public struct SearchRequest: Equatable, Sendable {
         self.sortKey = sortKey
         self.ascending = ascending
         self.sortEmptyResults = sortEmptyResults
+        self.scope = scope
         self.limit = limit
         self.offset = offset
     }

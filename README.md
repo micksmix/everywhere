@@ -9,9 +9,11 @@ that indexes filenames and metadata, so you can find files without searching the
 
 - **Search as you type:** filename fragments, wildcards, regex, boolean queries, and path matching.
 - **Useful filters:** files or folders, extension, type, size, modification date, and folder scope.
+- **Saved scopes:** named sets of indexed folders and reusable search expressions, with pinned favorites and a default scope.
+- **Offline volumes:** classify local, network, and removable locations; optionally retain disconnected indexes and refresh them on reconnection.
 - **Native results:** sortable columns even before searching, saved layouts, highlighted matches, and Quick Look previews.
 - **File actions:** open, reveal in Finder, Get Info, Open With, Open in Terminal, and copy names or paths.
-- **Easy access:** menu bar icon, configurable global shortcut (default **⌥Space**), and launch at login.
+- **Easy access:** menu bar icon, recordable global shortcut including punctuation (default **⌥Space**), and launch at login.
 - **Fresh results:** low-overhead, batched file-level live updates, catch-up after the app was closed, and optional daily, weekly, or monthly full checks.
 - **Indexing controls:** choose folders and exclusions, pause or resume scans, and search the saved index immediately.
 - **macOS conveniences:** search history, offline help, light/dark appearance, and built-in updates.

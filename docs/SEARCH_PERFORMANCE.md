@@ -385,3 +385,51 @@ A separate isolated AppKit harness verified native Path sort descriptors in both
 directions and continued ordering after loading another page. It also checked query
 replacement and highlight refreshes programmatically; physical keyboard/mouse input
 and end-to-end drawing latency were not measured.
+
+## Regex and folder-scope filtering — November 4, 2026
+
+A disposable release XCTest indexed one million synthetic file entries in a single
+`/benchmark` root, in 100 batches of 10,000. Every hundredth filename was
+`project_<number>_unit.pas`; the others were
+`workspace_<number>_component_filename.swift`. Searches requested 200 rows, included
+exact totals and returned path construction, and used one warm-up plus five timed
+runs. The table reports medians; initial cache loading and AppKit drawing are excluded.
+
+| Search | Before | After |
+| --- | ---: | ---: |
+| Missing regex `component_filename_missing`, memory | 13.41 ms | 1.75 ms |
+| Regex `unit\.pas$`, memory, 10,000 matches | 33.05 ms | 12.73 ms |
+| Missing regex, disk | 139.62 ms | 119.44 ms |
+| Regex `unit\.pas$`, disk | 115.05 ms | 92.44 ms |
+| `ext:pas unit`, disk | 344.30 ms | 111.85 ms |
+| `in:/benchmark unit`, memory mode with SQL scope filtering | 868.60 ms | 151.08 ms |
+| Repeated missing literal, memory | 0.067 ms | 0.067 ms |
+| Repeated `.pas` literal, memory | 0.292 ms | 0.323 ms |
+
+Regex name filtering now shares the compiled ASCII skip matcher and conservative
+character masks used by literal searches, and reuses regex decisions for identical
+cached names. Non-ASCII names bypass the ASCII prefilter: Unicode case folding can
+match ASCII regex text against names such as `Kelvin.txt` and `ſample.txt`.
+Disk prefilters now avoid redundant ASCII lowercasing and retain Unicode candidates
+using UTF-8 byte/character lengths before the exact Swift/regex match.
+
+Folder scopes recurse through directories rather than materializing a recursive row
+for every file. Repeated folder restrictions across OR branches share one CTE.
+The folder comparison above was measured immediately before and after these scope
+optimizations; the other baseline rows use the initial 1.11.0 implementation.
+A new empty location-only scope counted all one million results and returned the
+recent 200 in 100.09 ms (disk) / 101.08 ms (memory enabled), using SQL's modified-time
+index and limit rather than sorting every entry in Swift. A saved folder scope with
+`ext:pas | ext:swift` plus typed `unit` took 214.81 / 219.31 ms. These two new-scope
+measurements have no equivalent pre-feature baseline.
+
+The database remained exactly 171,483,136 bytes before and after; no schema or
+persistent index changed. Construction took 3.63 / 3.45 seconds, which is not an
+indexing improvement claim. Unchanged disk literal paths varied from 194.98 to
+206.52 ms (missing) and 231.45 to 247.78 ms (`.pas`); memory extension filtering
+varied from 21.44 to 21.93 ms. Treat these small shifts as run variation, not gains.
+The fixture has unusually few directories and mostly ASCII, unique names; it does
+not predict deep trees, real network latency, cold starts, or end-to-end typing.
+The temporary benchmark was removed. Permanent tests cover escaped regex literals,
+Unicode case folding, shared names, scope unions/negation/OR, recent-item ties,
+pagination, cancellation, and memory/disk parity after updates.

@@ -198,8 +198,13 @@ public final class ChangeHandler: @unchecked Sendable {
         self.config = config
         self.recoveryRoots = recoveryRoots ?? config.roots
         self.queue = queue ?? DispatchQueue(label: "app.everywhere.changes", qos: .utility)
-        rootPaths = config.roots.sorted { $0.count > $1.count }.map {
-            (Self.normalizedPath($0), Walk.canonicalPath($0))
+        if config.canonicalRootPaths.count == config.roots.count {
+            rootPaths = zip(config.roots, config.canonicalRootPaths).map { (Self.normalizedPath($0), $1) }
+                .sorted { $0.0.count > $1.0.count }
+        } else {
+            rootPaths = config.roots.sorted { $0.count > $1.count }.map {
+                (Self.normalizedPath($0), Walk.canonicalPath($0))
+            }
         }
         self.debounce = debounce
         self.maxDebounce = max(maxDebounce, debounce)

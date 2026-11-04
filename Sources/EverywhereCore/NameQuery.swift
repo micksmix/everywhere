@@ -10,14 +10,14 @@ struct NameQuery {
         let regex: NSRegularExpression?
         let skipTable: [UInt8]
 
-        init(_ term: ParsedTerm, matchCase: Bool, wholeWord: Bool) {
+        init(_ term: ParsedTerm, matchCase: Bool, wholeWord: Bool, literal: Bool = false) {
             text = matchCase ? term.text : term.text.lowercased()
             bytes = Array(text.utf8)
             negated = term.isNegated
             ascii = bytes.allSatisfy { $0 < 128 }
-            wildcard = term.hasWildcards
+            wildcard = !literal && term.hasWildcards
             var pattern: String?
-            if term.hasWildcards {
+            if wildcard {
                 pattern = "^" + term.text.map { character in
                     switch character {
                     case "*": return ".*"
@@ -65,6 +65,14 @@ struct NameQuery {
         literalTerms = parsed.groups.count == 1 && !request.wholeWord &&
             parsed.groups[0].terms.allSatisfy { !$0.isNegated && !$0.hasWildcards }
             ? groups[0].map(\.text) : nil
+    }
+
+    init(literal: String, matchCase: Bool) {
+        self.matchCase = matchCase
+        let term = Term(ParsedTerm(text: literal, isNegated: false), matchCase: matchCase, wholeWord: false, literal: true)
+        groups = [[term]]
+        requiredMasks = [Self.characterMask(term.bytes)]
+        literalTerms = [term.text]
     }
 
     static func characterMask<S: Sequence>(_ bytes: S) -> UInt64 where S.Element == UInt8 {

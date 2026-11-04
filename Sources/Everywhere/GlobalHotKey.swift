@@ -1,28 +1,41 @@
 import Foundation
 import Combine
 import Carbon.HIToolbox
+import EverywhereCore
 
 final class GlobalHotKey {
     var handler: (() -> Void)?
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
+    private var registeredID: UInt32?
+    private var nextID: UInt32 = 0
     private static let signature = OSType(0x4556_5752)
 
     @discardableResult
     func register(keyCode: UInt32, modifiers: UInt32) -> OSStatus {
+        unregister()
         if eventHandlerRef == nil {
             var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                           eventKind: UInt32(kEventHotKeyPressed))
             let status = InstallEventHandler(GetApplicationEventTarget(), hotKeyCallback, 1, &eventType,
                                              Unmanaged.passUnretained(self).toOpaque(), &eventHandlerRef)
             guard status == noErr else { return status }
+            guard eventHandlerRef != nil else { return OSStatus(eventInternalErr) }
         }
-        guard hotKeyRef == nil else { return noErr }
-        let hotKeyID = EventHotKeyID(signature: Self.signature, id: 1)
-        return RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+        nextID = nextID == UInt32.max ? 1 : nextID + 1
+        let hotKeyID = EventHotKeyID(signature: Self.signature, id: nextID)
+        let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+        guard status == noErr else {
+            hotKeyRef = nil
+            return status
+        }
+        guard hotKeyRef != nil else { return OSStatus(eventInternalErr) }
+        registeredID = nextID
+        return noErr
     }
 
     func unregister() {
+        registeredID = nil
         if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
         hotKeyRef = nil
     }
@@ -33,7 +46,9 @@ final class GlobalHotKey {
     }
 
     fileprivate func handle(_ id: EventHotKeyID) -> OSStatus {
-        guard id.signature == Self.signature, id.id == 1 else { return OSStatus(eventNotHandledErr) }
+        guard hotKeyRef != nil, id.signature == Self.signature, id.id == registeredID else {
+            return OSStatus(eventNotHandledErr)
+        }
         handler?()
         return noErr
     }
@@ -49,83 +64,15 @@ private let hotKeyCallback: EventHandlerUPP = { _, event, userData in
     return Unmanaged<GlobalHotKey>.fromOpaque(userData).takeUnretainedValue().handle(hotKeyID)
 }
 
-struct GlobalShortcut: Codable, Equatable {
-    var keyCode: UInt32
-    var modifiers: UInt32
-
-    static let standard = GlobalShortcut(keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey))
-    static let keys: [(name: String, code: UInt32)] = [
-        ("Space", UInt32(kVK_Space)),
-        ("A", UInt32(kVK_ANSI_A)),
-        ("B", UInt32(kVK_ANSI_B)),
-        ("C", UInt32(kVK_ANSI_C)),
-        ("D", UInt32(kVK_ANSI_D)),
-        ("E", UInt32(kVK_ANSI_E)),
-        ("F", UInt32(kVK_ANSI_F)),
-        ("G", UInt32(kVK_ANSI_G)),
-        ("H", UInt32(kVK_ANSI_H)),
-        ("I", UInt32(kVK_ANSI_I)),
-        ("J", UInt32(kVK_ANSI_J)),
-        ("K", UInt32(kVK_ANSI_K)),
-        ("L", UInt32(kVK_ANSI_L)),
-        ("M", UInt32(kVK_ANSI_M)),
-        ("N", UInt32(kVK_ANSI_N)),
-        ("O", UInt32(kVK_ANSI_O)),
-        ("P", UInt32(kVK_ANSI_P)),
-        ("Q", UInt32(kVK_ANSI_Q)),
-        ("R", UInt32(kVK_ANSI_R)),
-        ("S", UInt32(kVK_ANSI_S)),
-        ("T", UInt32(kVK_ANSI_T)),
-        ("U", UInt32(kVK_ANSI_U)),
-        ("V", UInt32(kVK_ANSI_V)),
-        ("W", UInt32(kVK_ANSI_W)),
-        ("X", UInt32(kVK_ANSI_X)),
-        ("Y", UInt32(kVK_ANSI_Y)),
-        ("Z", UInt32(kVK_ANSI_Z)),
-        ("0", UInt32(kVK_ANSI_0)),
-        ("1", UInt32(kVK_ANSI_1)),
-        ("2", UInt32(kVK_ANSI_2)),
-        ("3", UInt32(kVK_ANSI_3)),
-        ("4", UInt32(kVK_ANSI_4)),
-        ("5", UInt32(kVK_ANSI_5)),
-        ("6", UInt32(kVK_ANSI_6)),
-        ("7", UInt32(kVK_ANSI_7)),
-        ("8", UInt32(kVK_ANSI_8)),
-        ("9", UInt32(kVK_ANSI_9)),
-    ]
-    static let modifierOptions: [(name: String, flag: UInt32)] = [
-        ("⌃ Control", UInt32(controlKey)), ("⌥ Option", UInt32(optionKey)),
-        ("⇧ Shift", UInt32(shiftKey)), ("⌘ Command", UInt32(cmdKey))
-    ]
-
-    var isValid: Bool {
-        Self.keys.contains { $0.code == keyCode }
-            && modifiers & UInt32(controlKey | optionKey | cmdKey) != 0
-            && modifiers & ~UInt32(controlKey | optionKey | cmdKey | shiftKey) == 0
-    }
-
-    var displayName: String {
-        let symbols = Self.modifierOptions.filter { modifiers & $0.flag != 0 }
-            .map { String($0.name.prefix(1)) }.joined()
-        return symbols + " " + (Self.keys.first { $0.code == keyCode }?.name ?? "Unknown")
-    }
-}
-
 final class HotKeyManager: ObservableObject {
     @Published private(set) var registrationError: String?
+    @Published private(set) var isRecording = false
+    @Published private(set) var shortcut: GlobalShortcut?
     @Published var enabled: Bool {
         didSet {
             defaults.set(enabled, forKey: "HotKeyEnabled")
-            if activated { apply() }
-        }
-    }
-
-    @Published var shortcut: GlobalShortcut {
-        didSet {
-            if let data = try? JSONEncoder().encode(shortcut) {
-                defaults.set(data, forKey: "GlobalShortcut")
-            }
-            if activated { apply() }
+            if isRecording { cancelRecording() }
+            else if activated { apply() }
         }
     }
 
@@ -133,13 +80,16 @@ final class HotKeyManager: ObservableObject {
     private let defaults: UserDefaults
     private let hotKey = GlobalHotKey()
     private var activated = false
+    private var activationGeneration: UInt64 = 0
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         enabled = defaults.object(forKey: "HotKeyEnabled") == nil
             || defaults.bool(forKey: "HotKeyEnabled")
-        if let data = defaults.data(forKey: "GlobalShortcut"),
-           let saved = try? JSONDecoder().decode(GlobalShortcut.self, from: data), saved.isValid {
+        if defaults.bool(forKey: "GlobalShortcutCleared") {
+            shortcut = nil
+        } else if let data = defaults.data(forKey: "GlobalShortcut"),
+                  let saved = try? JSONDecoder().decode(GlobalShortcut.self, from: data), saved.isValid {
             shortcut = saved
         } else {
             shortcut = .standard
@@ -147,27 +97,110 @@ final class HotKeyManager: ObservableObject {
     }
 
     func activate() {
+        guard !activated else { return }
         hotKey.handler = { [weak self] in
-            DispatchQueue.main.async { self?.onActivate?() }
+            guard let self, !self.isRecording, self.enabled else { return }
+            let generation = self.activationGeneration
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.isRecording, self.enabled,
+                      self.shortcut != nil, self.activationGeneration == generation else { return }
+                self.onActivate?()
+            }
         }
         activated = true
         apply()
     }
 
-    private func apply() {
+    func beginRecording() {
+        guard !isRecording else { return }
+        activationGeneration &+= 1
+        isRecording = true
         registrationError = nil
         hotKey.unregister()
-        if enabled {
-            guard shortcut.isValid else {
-                registrationError = "Choose a key with at least Control, Option, or Command."
-                return
-            }
-            let status = hotKey.register(keyCode: shortcut.keyCode, modifiers: shortcut.modifiers)
-            if status != noErr {
-                registrationError = "Could not register \(shortcut.displayName) (error \(status)). Another app may be using it. Choose another shortcut, or switch this option off and on to retry."
-            }
-        } else {
-            hotKey.unregister()
+    }
+
+    func cancelRecording() {
+        guard isRecording else { return }
+        isRecording = false
+        apply()
+    }
+
+    func reportRecordingError(_ message: String) {
+        registrationError = message
+    }
+
+    @discardableResult
+    func finishRecording(with candidate: GlobalShortcut) -> Bool {
+        guard isRecording else { return false }
+        if let error = candidate.validationError {
+            registrationError = error
+            return false
         }
+        if let conflict = ShortcutConflicts.message(for: candidate) {
+            registrationError = conflict
+            return false
+        }
+        let status = hotKey.register(keyCode: candidate.keyCode, modifiers: candidate.modifiers)
+        guard status == noErr else {
+            registrationError = registrationFailure(for: candidate, status: status)
+            return false
+        }
+        saveShortcut(candidate)
+        activationGeneration &+= 1
+        isRecording = false
+        registrationError = nil
+        if !enabled || !activated { hotKey.unregister() }
+        return true
+    }
+
+    func clearShortcut() {
+        saveShortcut(nil)
+        if isRecording { cancelRecording() }
+        else { apply() }
+    }
+
+    func resetShortcut() {
+        saveShortcut(.standard)
+        if isRecording { cancelRecording() }
+        else { apply() }
+    }
+
+    func retryRegistration() {
+        guard !isRecording else { return }
+        apply()
+    }
+
+    private func saveShortcut(_ shortcut: GlobalShortcut?) {
+        self.shortcut = shortcut
+        defaults.set(shortcut == nil, forKey: "GlobalShortcutCleared")
+        if let shortcut, let data = try? JSONEncoder().encode(shortcut) {
+            defaults.set(data, forKey: "GlobalShortcut")
+        }
+    }
+
+    private func apply() {
+        activationGeneration &+= 1
+        registrationError = nil
+        hotKey.unregister()
+        guard activated, !isRecording, enabled, let shortcut else { return }
+        if let error = shortcut.validationError {
+            registrationError = error
+            return
+        }
+        if let conflict = ShortcutConflicts.message(for: shortcut) {
+            registrationError = conflict
+            return
+        }
+        let status = hotKey.register(keyCode: shortcut.keyCode, modifiers: shortcut.modifiers)
+        if status != noErr {
+            registrationError = registrationFailure(for: shortcut, status: status)
+        }
+    }
+
+    private func registrationFailure(for shortcut: GlobalShortcut, status: OSStatus) -> String {
+        if status == OSStatus(eventHotKeyExistsErr) {
+            return "\(shortcut.localizedDisplayName) is already in use by another app. Record a different shortcut, or free it in the other app and retry."
+        }
+        return "Could not register \(shortcut.localizedDisplayName) (error \(status)). macOS or another app may be using it. Record a different shortcut or retry."
     }
 }

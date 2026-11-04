@@ -18,6 +18,7 @@ struct IndexCheckpoint: Codable, Equatable {
     var skipPathPrefixes: [String]
     var skipDirNames: [String]
     var volumeCursors: [String: VolumeCursor]
+    var locationIdentities: [String]?
 
     static func identity(of path: String) -> String? {
         var info = stat()
@@ -33,6 +34,7 @@ struct IndexCheckpoint: Codable, Equatable {
         namePatterns = config.namePatterns
         skipPathPrefixes = config.skipPathPrefixes
         skipDirNames = config.skipDirNames
+        locationIdentities = config.locationIdentities
         volumeCursors = Dictionary(uniqueKeysWithValues: (volumes ?? IndexedVolume.discover(config: config)).map {
             ($0.path, VolumeCursor(journalIdentity: $0.journalIdentity, eventID: $0.journalEventID,
                                   journalEventID: $0.journalEventID, roots: $0.roots, canonicalRoots: $0.canonicalRoots))
@@ -44,6 +46,7 @@ struct IndexCheckpoint: Codable, Equatable {
               databaseIdentity == Self.identity(of: databasePath),
               roots == config.roots, exclusions == config.exclusions,
               (namePatterns ?? []) == config.namePatterns,
+              (locationIdentities ?? []) == config.locationIdentities,
               skipPathPrefixes == config.skipPathPrefixes, skipDirNames == config.skipDirNames else { return false }
         let current = volumes ?? IndexedVolume.discover(config: config)
         guard !current.isEmpty, Set(current.map(\.path)) == Set(volumeCursors.keys) else { return false }

@@ -180,8 +180,9 @@ final class FilenameIndex {
 
     func selectRegex(request: SearchRequest, cancellation: SearchCancellation?,
                      literal: String?, pathIndex: () throws -> PathSortIndex, matchesRegex: (String) -> Bool) throws -> (rows: [(Row, String)], total: Int) {
-        let literalBytes = literal?.utf8.map { foldASCII($0) }
+        let prefilter = literal.map { NameQuery(literal: $0, matchCase: request.matchCase) }
         var matches: [UInt32] = []
+        var nameMatches: [Int: Bool] = [:]
         try names.withUnsafeBufferPointer { bytes in
             for (offset, index) in idOrder.enumerated() {
                 if offset % 256 == 0 { try cancellation?.check() }
@@ -189,9 +190,19 @@ final class FilenameIndex {
                 guard request.includeHidden || bytes[row.nameOffset] != 46,
                       request.kind != .files || !row.isDirectory,
                       request.kind != .folders || row.isDirectory else { continue }
-                if let literalBytes, !containsLiteral(bytes, row, literalBytes) { continue }
-                let name = String(decoding: UnsafeBufferPointer(start: bytes.baseAddress!.advanced(by: row.nameOffset), count: Int(row.nameLength)), as: UTF8.self)
-                if matchesRegex(name) { matches.append(index) }
+                if row.isASCII, let prefilter, !prefilter.mayMatch(mask: row.mask) { continue }
+                if repeatedNames, let matched = nameMatches[row.nameOffset] {
+                    if matched { matches.append(index) }
+                    continue
+                }
+                let nameBytes = UnsafeBufferPointer(start: bytes.baseAddress!.advanced(by: row.nameOffset), count: Int(row.nameLength))
+                if row.isASCII, let prefilter, !prefilter.matches(bytes: nameBytes, isASCII: true) {
+                    if repeatedNames { nameMatches[row.nameOffset] = false }
+                    continue
+                }
+                let matched = matchesRegex(String(decoding: nameBytes, as: UTF8.self))
+                if repeatedNames { nameMatches[row.nameOffset] = matched }
+                if matched { matches.append(index) }
             }
         }
         let ordering = Ordering(key: request.sortKey, ascending: request.ascending)
@@ -228,27 +239,6 @@ final class FilenameIndex {
             return ordered
         }
         return try sortedIndices(matches, ordering: ordering, cancellation: cancellation, pathIndex: pathIndex)
-    }
-
-    private func foldASCII(_ byte: UInt8) -> UInt8 {
-        byte >= 65 && byte <= 90 ? byte + 32 : byte
-    }
-
-    private func containsLiteral(_ bytes: UnsafeBufferPointer<UInt8>, _ row: Row, _ literal: [UInt8]) -> Bool {
-        let start = row.nameOffset
-        let end = row.nameOffset + Int(row.nameLength)
-        guard literal.count <= Int(row.nameLength) else { return false }
-        var offset = start
-        while offset + literal.count <= end {
-            var matched = true
-            for (step, byte) in literal.enumerated() where foldASCII(bytes[offset + step]) != byte {
-                matched = false
-                break
-            }
-            if matched { return true }
-            offset += 1
-        }
-        return false
     }
 
     func apply(changedIDs: Set<Int64>, replacements: [Int64: IndexRow], cancellation: SearchCancellation?,

@@ -8,6 +8,7 @@ final class FileChangeReconciler: IndexEngine {
         for path in paths.sorted() {
             if isCancelled() { return }
             if config.ignores(path: path) { continue }
+            guard try config.validateLocation(at: path) else { continue }
             let parent = (path as NSString).deletingLastPathComponent
             let parentID: Int64
             if let cached = parents[parent] {
@@ -31,11 +32,13 @@ final class FileChangeReconciler: IndexEngine {
             bump { $0.scannedItems += 1 }
             guard let info = Walk.lstatInfo(path) else {
                 let error = errno
+                guard try config.validateLocation(at: parent) else { continue }
                 guard error == ENOENT || error == ENOTDIR else {
                     bump { $0.skipped += 1 }
                     continue
                 }
                 if let row {
+                    guard !config.protectsUnavailableDescendant(of: path) else { continue }
                     if row.isDirectory { try db.deleteSubtree(id: row.id) }
                     else {
                         deletes.append(row.id)
@@ -53,6 +56,7 @@ final class FileChangeReconciler: IndexEngine {
                 continue
             }
             if row?.isDirectory == true {
+                guard !config.protectsUnavailableDescendant(of: path) else { continue }
                 try db.deleteSubtree(id: row!.id)
                 bump { $0.deleted += 1 }
             }

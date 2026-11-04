@@ -13,6 +13,13 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
             }
         }
     }
+    let scopeSettings: SearchScopeSettings
+    @Published private(set) var scopes: [SearchScope] = []
+    @Published var selectedScopeID: UUID? {
+        didSet {
+            if selectedScopeID != oldValue { scheduleSearch() }
+        }
+    }
     @Published private(set) var displayedRequest = SearchRequest()
     var previewSelection: (() -> Void)?
     private var history = SearchHistory()
@@ -76,6 +83,9 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     private var memorySubscription: AnyCancellable?
     private var changeSubscription: AnyCancellable?
     private var indexSubscription: AnyCancellable?
+    private var scopeSubscription: AnyCancellable?
+    private var availabilitySubscription: AnyCancellable?
+    @Published private(set) var locationAvailabilityRevision: UInt64 = 0
 
     init(database: Database, indexService: IndexService, defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -84,7 +94,21 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         sortAscending = defaults.object(forKey: "ResultsSortAscending") == nil || defaults.bool(forKey: "ResultsSortAscending")
         self.database = database
         self.indexService = indexService
+        scopeSettings = SearchScopeSettings(defaults: defaults)
+        scopes = scopeSettings.orderedScopes
+        selectedScopeID = scopeSettings.defaultScopeID
         scheduleSearch()
+        scopeSubscription = scopeSettings.$scopes
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.scopes = self.scopeSettings.orderedScopes
+                if !self.scopes.contains(where: { $0.id == self.selectedScopeID }) {
+                    self.selectedScopeID = nil
+                }
+                self.scheduleSearch()
+            }
         memorySubscription = AppPreferences.shared.$keepSearchIndexInMemory
             .dropFirst()
             .receive(on: DispatchQueue.main)
@@ -94,6 +118,21 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
             .debounce(for: .milliseconds(150), scheduler: DispatchQueue.main)
             .throttle(for: .milliseconds(500), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] _ in self?.refreshIndexResults() }
+        var locationPaths = indexService.locationStatuses.reduce(into: [UUID: String]()) { $0[$1.id] = $1.path }
+        availabilitySubscription = indexService.$locationStatuses.dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] statuses in
+                guard let self else { return }
+                var moves: [String: String] = [:]
+                for status in statuses {
+                    if let previous = locationPaths[status.id], previous != status.path {
+                        moves[previous] = status.path
+                    }
+                    locationPaths[status.id] = status.path
+                }
+                self.scopeSettings.relocateFolders(using: moves)
+                self.locationAvailabilityRevision &+= 1
+            }
         indexSubscription = indexService.$phase
             .removeDuplicates()
             .dropFirst()
@@ -181,7 +220,8 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
             sortKey: sortKey,
             ascending: sortAscending,
             sortEmptyResults: sortEmptyResults,
-            limit: 200
+            limit: 200,
+            scope: scopes.first { $0.id == selectedScopeID }
         )
     }
 
@@ -318,7 +358,23 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         confirmAndOpen(selectedEntries)
     }
 
+    func isAvailable(_ entry: Entry) -> Bool {
+        indexService.isAvailable(path: entry.path)
+    }
+
+    @discardableResult
+    func requireAvailable(_ entries: [Entry]) -> Bool {
+        guard let offline = entries.first(where: { !isAvailable($0) }) else { return true }
+        let alert = NSAlert()
+        alert.messageText = "Location unavailable"
+        alert.informativeText = "Reconnect the volume or network share for “\(offline.name)” and wait for its location to become available. Its last indexed metadata and path remain searchable."
+        alert.addButton(withTitle: "OK")
+        if let window = hostWindow { alert.beginSheetModal(for: window) } else { alert.runModal() }
+        return false
+    }
+
     func confirmAndOpen(_ entries: [Entry]) {
+        guard requireAvailable(entries) else { return }
         let targets = Array(entries.prefix(10))
         guard !targets.isEmpty else { return }
         guard AppPreferences.shared.confirmBeforeOpening, let window = hostWindow else {
@@ -343,7 +399,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
             if alert.suppressionButton?.state == .on {
                 AppPreferences.shared.confirmBeforeOpening = false
             }
-            guard response == .alertFirstButtonReturn else { return }
+            guard response == .alertFirstButtonReturn, self.requireAvailable(targets) else { return }
             for entry in targets { Self.open(entry) }
         }
     }
@@ -357,6 +413,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     }
 
     func revealSelection() {
+        guard requireAvailable(selectedEntries) else { return }
         rememberSearch()
         let urls = selectedEntries.map { URL(fileURLWithPath: $0.path) }
         guard !urls.isEmpty else { return }
@@ -364,6 +421,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     }
 
     func showInfo(_ entries: [Entry]) {
+        guard requireAvailable(entries) else { return }
         let urls = entries.prefix(10).map { URL(fileURLWithPath: $0.path) as NSURL }
         guard !urls.isEmpty else { return }
         let pasteboard = NSPasteboard.withUniqueName()
@@ -377,6 +435,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     }
 
     func openInTerminal(_ entries: [Entry]) {
+        guard requireAvailable(entries) else { return }
         let workspace = NSWorkspace.shared
         let selectedPath = AppPreferences.shared.terminalPath
         guard let terminal = selectedPath.isEmpty

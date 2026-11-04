@@ -35,6 +35,17 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     @Published public private(set) var indexRevision = 0
     @Published public private(set) var live = false
     @Published public private(set) var lastError: String?
+    @Published public private(set) var locationStatuses: [IndexLocationStatus] = []
+    private var locationAccess: [IndexLocationAccess] = []
+    private var locationRefreshRunning = false
+    private var locationReconciliationNeeded = false
+    private let locationQueue = DispatchQueue(label: "app.everywhere.locations", qos: .utility)
+    private var locationTimer: Timer?
+    private var locationSettingsSubscription: AnyCancellable?
+    private var settingsMutationSubscription: AnyCancellable?
+    private var preparationControl: IndexingControl?
+    private var preparationRebuild = false
+    var mountedVolumesProvider: @Sendable () -> [IndexedVolume.Mount] = { IndexedVolume.mountedVolumes() }
 
     public enum LaunchAccessState: Equatable {
         case unchecked
@@ -66,6 +77,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     private let indexingQueue = DispatchQueue(label: "app.everywhere.indexing", qos: .utility)
     private let changesQueue = DispatchQueue(label: "app.everywhere.volume-changes", qos: .utility)
     private var started = false
+    private var automaticIndexingAllowed: Bool
     @Published public private(set) var isCompacting = false
     @Published public private(set) var compactionMessage: String?
     private var maintenanceTimer: Timer?
@@ -78,8 +90,40 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         self.settings = settings
         self.database = database
         self.accessCheck = accessCheck
+        automaticIndexingAllowed = settings.indexingEnabled
         lastFullCheckDate = IndexCheckpoint.load(databasePath: database.path)?.scannedAt
         launchAccessState = accessCheck == nil ? .ready : .unchecked
+        locationSettingsSubscription = settings.$locations.dropFirst()
+            .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshLocationAvailability() }
+        settingsMutationSubscription = Publishers.MergeMany([
+            settings.$locations.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            settings.$roots.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            settings.$exclusions.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            settings.$excludedNamePatterns.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            settings.$excludedFolders.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            settings.$builtInExcludedFolders.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            settings.$builtInExcludedDirectoryNames.dropFirst().map { _ in () }.eraseToAnyPublisher()
+        ]).sink { [weak self] _ in self?.invalidateLocationPreparation() }
+        refreshLocationAvailability()
+    }
+
+    private func invalidateLocationPreparation() {
+        guard let control = preparationControl, activeControl === control else { return }
+        let rebuild = preparationRebuild
+        control.cancel()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.activeControl === control, self.automaticIndexingAllowed, self.settings.indexingEnabled else { return }
+            self.beginIndexing(rebuild: rebuild, preservingPause: self.isPaused)
+        }
+    }
+
+    public func locationStatus(for path: String) -> IndexLocationStatus? {
+        locationStatuses.first { IndexedVolume.contains($0.path, Walk.normalizePath(path)) }
+    }
+
+    public func isAvailable(path: String) -> Bool {
+        locationStatus(for: path)?.isAvailable ?? true
     }
 
     public var isBusy: Bool { phase != .idle }
@@ -133,6 +177,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     deinit {
         countdownTimer?.invalidate()
         maintenanceTimer?.invalidate()
+        locationTimer?.invalidate()
         activeControl.cancel()
         monitors.forEach { $0.stop() }
         changeHandlers.forEach { $0.stop() }
@@ -233,8 +278,13 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                 }
             }
         }
+        let locationTimer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            self?.refreshLocationAvailability()
+        }
+        locationTimer.tolerance = 1
+        self.locationTimer = locationTimer
+        RunLoop.main.add(locationTimer, forMode: .common)
         let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
-            self?.checkIndexedVolumes()
             self?.checkScheduledFullCheck()
             self?.compactIndexIfNeeded()
             self?.updateRebuildSuggestion()
@@ -246,7 +296,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     }
 
     public func checkScheduledFullCheck(now: Date = Date()) {
-        guard started, settings.indexingEnabled, launchAccessState == .ready,
+        guard started, automaticIndexingAllowed, settings.indexingEnabled, launchAccessState == .ready,
               !settings.needsLocationSetup, phase == .idle, !isCompacting,
               scheduledFullCheckIsDue(now: now) else { return }
         reconcileAndMonitor()
@@ -258,17 +308,78 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         return now.timeIntervalSince(baseline) >= interval
     }
 
-    private func checkIndexedVolumes() {
-        guard started, settings.indexingEnabled, settings.liveUpdates, phase == .idle, !isCompacting,
-              !settings.needsLocationSetup else { return }
-        let volumes = IndexedVolume.discover(config: makeConfig())
-        guard volumes.count != monitoredVolumes.count
-            || !zip(volumes, monitoredVolumes).allSatisfy({ $0.hasSameTopology(as: $1) }) else { return }
-        reconcileAndMonitor()
+    public func refreshLocationAvailability() {
+        guard !locationRefreshRunning else { return }
+        locationRefreshRunning = true
+        let config = makeConfig(includeLocationAccess: false)
+        let locations = settings.locations
+        let bindings = settings.locationBindings
+        let mountedVolumes = mountedVolumesProvider
+        let control = activeControl
+        locationQueue.async { [weak self] in
+            let config = config.preparingFilesystemPaths()
+            let mounts = mountedVolumes()
+            let resolution = IndexLocationResolver.resolve(locations: locations, bindings: bindings, config: config, mounts: mounts)
+            var resolvedConfig = config
+            resolvedConfig.roots = resolution.locations.map(\.path)
+            resolvedConfig.locationAccess = resolution.access
+            let volumes = IndexedVolume.discover(config: resolvedConfig, mounts: mounts)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.locationRefreshRunning = false
+                guard self.activeControl === control else { return }
+                let currentConfig = self.makeConfig(includeLocationAccess: false)
+                guard self.settings.locations == locations, self.settings.locationBindings == bindings,
+                      currentConfig.hasSameLogicalConfiguration(as: config) else {
+                    self.refreshLocationAvailability()
+                    return
+                }
+                let availabilityChanged = self.locationStatuses.map { [$0.path, String($0.isAvailable)] }
+                    != resolution.statuses.map { [$0.path, String($0.isAvailable)] }
+                let topologyChanged = volumes.count != self.monitoredVolumes.count
+                    || !zip(volumes, self.monitoredVolumes).allSatisfy { $0.hasSameTopology(as: $1) }
+                let retentionChanged = self.locationStatuses.contains { old in
+                    !old.isAvailable && old.keepIndexWhenUnavailable
+                        && resolution.statuses.contains { $0.id == old.id && !$0.keepIndexWhenUnavailable }
+                }
+                let needsReconciliation = availabilityChanged || retentionChanged || !resolution.relocations.isEmpty
+                    || (self.settings.liveUpdates && topologyChanged) || self.locationReconciliationNeeded
+                self.publishLocations(resolution, committed: false, applyBindings: !self.isBusy)
+                if needsReconciliation { self.locationReconciliationNeeded = true }
+                if self.started, self.automaticIndexingAllowed, self.settings.indexingEnabled, self.phase == .idle, !self.isCompacting,
+                   !self.settings.needsLocationSetup, needsReconciliation {
+                    self.locationReconciliationNeeded = false
+                    self.reconcileAndMonitor()
+                }
+            }
+        }
+    }
+
+    private func publishLocations(_ resolution: IndexLocationResolution, committed: Bool, applyBindings: Bool = true) {
+        var statuses = resolution.statuses
+        if !committed {
+            for relocation in resolution.relocations {
+                if let index = statuses.firstIndex(where: { $0.path == relocation.to }) {
+                    statuses[index].path = relocation.from
+                    statuses[index].isAvailable = false
+                }
+            }
+        }
+        statuses.sort { $0.path.count > $1.path.count }
+        if locationStatuses != statuses {
+            locationStatuses = statuses
+            indexRevision += 1
+        }
+        if applyBindings && (committed || resolution.relocations.isEmpty) {
+            locationAccess = resolution.access
+            if settings.locations != resolution.locations || settings.locationBindings != resolution.bindings {
+                settings.applyLocationResolution(resolution)
+            }
+        }
     }
 
     func compactIndexIfNeeded(now: Date = Date()) {
-        guard started, settings.indexingEnabled, phase == .idle, !isCompacting,
+        guard started, automaticIndexingAllowed, settings.indexingEnabled, phase == .idle, !isCompacting,
               lastMaintenanceCheck.map({ now.timeIntervalSince($0) >= 3600 }) ?? true else { return }
         lastMaintenanceCheck = now
         isCompacting = true
@@ -289,6 +400,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     }
 
     public func setIndexingEnabled(_ enabled: Bool) {
+        automaticIndexingAllowed = enabled
         settings.indexingEnabled = enabled
         cancelCountdown()
         activeControl.cancel()
@@ -338,25 +450,49 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     }
 
     private func beginCatchUp() {
+        locationReconciliationNeeded = false
         cancelCountdown()
         activeControl.cancel()
         let control = IndexingControl()
         activeControl = control
         phase = .reconciling
+        preparationControl = control
+        preparationRebuild = false
         let db = database
+        let config = makeConfig(includeLocationAccess: false)
+        let locations = settings.locations
+        let bindings = settings.locationBindings
+        let mountedVolumes = mountedVolumesProvider
         indexingQueue.async { [weak self] in
             guard control.waitUntilRunning() else { return }
             do {
+                let config = config.preparingFilesystemPaths()
                 let count = try db.count()
+                let mounts = mountedVolumes()
+                let resolution = IndexLocationResolver.resolve(locations: locations, bindings: bindings, config: config, mounts: mounts)
+                let scanConfig = resolution.applying(to: config)
+                let volumes = IndexedVolume.discover(config: scanConfig, mounts: mounts)
+                let saved = IndexCheckpoint.load(databasePath: db.path)
+                let checkpoint = saved?.isValid(databasePath: db.path, config: scanConfig, volumes: volumes) == true ? saved : nil
                 DispatchQueue.main.async { [weak self] in
                     guard let self, !control.isCancelled else { return }
+                    guard self.settings.locations == locations, self.settings.locationBindings == bindings,
+                          self.makeConfig(includeLocationAccess: false).hasSameLogicalConfiguration(as: config) else {
+                        self.beginCatchUp()
+                        return
+                    }
+                    self.preparationControl = nil
                     self.indexedRows = count
+                    self.publishLocations(resolution, committed: false)
                     let paused = self.isPaused
                     if count == 0 { self.rebuild() }
-                    else if let checkpoint = self.validCheckpoint() {
+                    else if !resolution.relocations.isEmpty || !resolution.unavailablePathsToRemove.isEmpty {
+                        self.reconcileAndMonitor()
+                    }
+                    else if let checkpoint {
                         self.lastFullCheckDate = checkpoint.scannedAt
                         if self.scheduledFullCheckIsDue(now: Date()) { self.reconcileAndMonitor() }
-                        else { self.replayChanges(checkpoint) }
+                        else { self.replayChanges(checkpoint, config: scanConfig, volumes: volumes) }
                     }
                     else { self.reconcileAndMonitor() }
                     if paused && self.canPause { self.togglePause() }
@@ -379,13 +515,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         countdownSeconds = 0
     }
 
-    private func validCheckpoint() -> IndexCheckpoint? {
-        guard let checkpoint = IndexCheckpoint.load(databasePath: database.path),
-              checkpoint.isValid(databasePath: database.path, config: makeConfig()) else { return nil }
-        return checkpoint
-    }
-
-    private func replayChanges(_ checkpoint: IndexCheckpoint) {
+    private func replayChanges(_ checkpoint: IndexCheckpoint, config: IndexConfig, volumes: [IndexedVolume]) {
         activeControl.cancel()
         stopMonitor()
         activeControl = IndexingControl()
@@ -394,7 +524,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         progressRows = 0
         progressStats = IndexerStats()
         lastError = nil
-        if !startMonitor(checkpoint: checkpoint) {
+        if !startMonitor(checkpoint: checkpoint, config: config, volumes: volumes) {
             reconcileAndMonitor()
         }
     }
@@ -409,23 +539,90 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         beginIndexing(rebuild: false)
     }
 
-    private func beginIndexing(rebuild: Bool) {
+    private func beginIndexing(rebuild: Bool, preservingPause: Bool = false) {
+        locationReconciliationNeeded = false
         activeControl.cancel()
         stopMonitor()
         IndexCheckpoint.remove(databasePath: database.path)
         let control = IndexingControl()
+        if preservingPause { control.pause() }
         activeControl = control
-        isPaused = false
+        isPaused = preservingPause
         phase = rebuild ? .indexing : .reconciling
+        preparationControl = control
+        preparationRebuild = rebuild
         progressRows = 0
         progressStats = IndexerStats()
         lastError = nil
 
         let db = database
-        let config = makeConfig()
-        let volumes = IndexedVolume.discover(config: config)
-        let checkpoint = IndexCheckpoint(databasePath: db.path, config: config, volumes: volumes)
-        let monitoring = startMonitor(checkpoint: checkpoint, suspended: true, volumes: volumes)
+        let config = makeConfig(includeLocationAccess: false)
+        let locations = settings.locations
+        let bindings = settings.locationBindings
+        let mountedVolumes = mountedVolumesProvider
+        let retired = settings.retiredLocationPaths
+        indexingQueue.async { [weak self] in
+            guard control.waitUntilRunning() else { return }
+            do {
+                let config = config.preparingFilesystemPaths()
+                let mounts = mountedVolumes()
+                let resolution = IndexLocationResolver.resolve(locations: locations, bindings: bindings, config: config, mounts: mounts)
+                let authorized = DispatchQueue.main.sync { [weak self] in
+                    guard let self, !control.isCancelled, self.activeControl === control,
+                          self.settings.locations == locations, self.settings.locationBindings == bindings,
+                          self.makeConfig(includeLocationAccess: false).hasSameLogicalConfiguration(as: config) else { return false }
+                    self.settings.recordRetiredLocations(resolution.relocations.map(\.to))
+                    return true
+                }
+                guard authorized, control.waitUntilRunning() else { return }
+                let paths = resolution.locations.map(\.path)
+                let lookupRoots = Array(Set(config.roots + paths + retired + resolution.relocations.map(\.to))).sorted()
+                for relocation in resolution.relocations {
+                    guard control.waitUntilRunning() else { return }
+                    let destinationIsUnowned = !bindings.contains { $0.path == relocation.to && $0.path != relocation.from }
+                    try db.relocateIndexedSubtree(from: relocation.from, to: relocation.to, roots: lookupRoots,
+                                                  replacingEmptyDestination: destinationIsUnowned)
+                }
+                guard control.waitUntilRunning() else { return }
+                try db.synchronizeIndexedRoots(roots: paths, previousRoots: lookupRoots)
+                let protected = resolution.statuses.filter { $0.isAvailable || $0.keepIndexWhenUnavailable }.map(\.path)
+                for path in resolution.unavailablePathsToRemove {
+                    guard control.waitUntilRunning() else { return }
+                    try db.removeIndexedSubtree(path: path, roots: lookupRoots, preservingSubtreesAt: protected)
+                }
+                let scanConfig = resolution.applying(to: config)
+                let volumes = IndexedVolume.discover(config: scanConfig, mounts: mounts)
+                let checkpoint = IndexCheckpoint(databasePath: db.path, config: scanConfig, volumes: volumes)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !control.isCancelled else { return }
+                    guard self.settings.locations == locations, self.settings.locationBindings == bindings,
+                          self.makeConfig(includeLocationAccess: false).hasSameLogicalConfiguration(as: config) else {
+                        self.beginIndexing(rebuild: rebuild, preservingPause: self.isPaused)
+                        return
+                    }
+                    self.preparationControl = nil
+                    self.publishLocations(resolution, committed: true)
+                    self.settings.acknowledgeRetiredLocations()
+                    let monitoring = self.startMonitor(checkpoint: checkpoint, suspended: true, config: scanConfig, volumes: volumes)
+                    let preserved = resolution.statuses.filter { !$0.isAvailable && $0.keepIndexWhenUnavailable }.map(\.path)
+                    self.runBaseline(rebuild: rebuild, config: scanConfig, checkpoint: checkpoint,
+                                     monitoring: monitoring, control: control, preserved: preserved)
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    guard !control.isCancelled else { return }
+                    self?.lastError = String(describing: error)
+                    self?.isPaused = false
+                    self?.phase = .idle
+                    self?.refreshLocationAvailability()
+                }
+            }
+        }
+    }
+
+    private func runBaseline(rebuild: Bool, config: IndexConfig, checkpoint: IndexCheckpoint,
+                             monitoring: Bool, control: IndexingControl, preserved: [String]) {
+        let db = database
         indexingQueue.async { [weak self] in
             guard control.waitUntilRunning() else { return }
             let progress: @Sendable (IndexerStats) -> Void = { [weak self] stats in
@@ -437,7 +634,10 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                 }
             }
             do {
-                if rebuild {
+                if rebuild && !preserved.isEmpty {
+                    try db.clear(preservingSubtreesAt: preserved, roots: config.roots)
+                }
+                if rebuild && preserved.isEmpty {
                     try db.clear()
                     try db.beginBulkLoad()
                     do {
@@ -455,6 +655,9 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                         control.resume()
                     }
                     try db.endBulkLoad()
+                    if !control.isCancelled {
+                        try db.synchronizeIndexedRoots(roots: config.roots, previousRoots: config.roots, createMissingRoots: false)
+                    }
                 } else {
                     try Reconciler(db: db, config: config, roots: config.roots, skipUnchangedDirs: false).run(
                         isCancelled: { !control.waitUntilRunning() }, progress: progress
@@ -486,6 +689,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                     guard !control.isCancelled else { return }
                     control.cancel()
                     self?.stopMonitor()
+                    self?.locationReconciliationNeeded = true
                     IndexCheckpoint.remove(databasePath: db.path)
                     self?.lastError = String(describing: error)
                     self?.isPaused = false
@@ -510,21 +714,14 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
             cancelCountdown()
         }
         guard phase == .waiting || phase == .idle else { return }
-        if let checkpoint = validCheckpoint() {
-            lastFullCheckDate = checkpoint.scannedAt
-            if scheduledFullCheckIsDue(now: Date()) { reconcileAndMonitor() }
-            else { replayChanges(checkpoint) }
-        }
-        else { reconcileAndMonitor() }
+        beginCatchUp()
     }
 
     private func startMonitor(checkpoint: IndexCheckpoint, suspended: Bool = false,
-                              volumes: [IndexedVolume]? = nil) -> Bool {
+                              config: IndexConfig, volumes: [IndexedVolume]) -> Bool {
         guard monitors.isEmpty else { return true }
         let control = activeControl
         let db = database
-        let config = makeConfig()
-        let volumes = volumes ?? IndexedVolume.discover(config: config)
         monitoredVolumes = volumes
         guard !volumes.isEmpty, Set(volumes.map(\.path)) == Set(checkpoint.volumeCursors.keys) else { return false }
         replayProgress = JournalReplayProgress(volumes: volumes.map(\.path))
@@ -565,6 +762,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                         guard !control.isCancelled else { return }
                         control.cancel()
                         self?.stopMonitor()
+                        self?.locationReconciliationNeeded = true
                         self?.phase = .idle
                         self?.isPaused = false
                         self?.lastError = String(describing: error)
@@ -577,12 +775,16 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
             guard monitor.start() else {
                 monitor.stop()
                 handler.stop(cancelControl: false)
+                lastError = "Some locations do not support file-system monitoring. They refresh on reconnection and full checks."
+                if suspended {
+                    _ = replayProgress.finish(volume: volume.path)
+                    continue
+                }
                 monitors.forEach { $0.stop() }
                 changeHandlers.forEach { $0.stop(cancelControl: false) }
                 monitors = []
                 changeHandlers = []
                 replayProgress = JournalReplayProgress()
-                lastError = "File-system monitoring could not start. Full checks will be used until monitoring is available."
                 return false
             }
             monitors.append(monitor)
@@ -592,8 +794,8 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                                                        flags: UInt32(kFSEventStreamEventFlagHistoryDone))])
             }
         }
-        live = settings.liveUpdates
-        return true
+        live = settings.liveUpdates && !monitors.isEmpty
+        return !monitors.isEmpty
     }
 
     private func stopMonitor() {
@@ -605,24 +807,33 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         live = false
     }
 
-    func makeConfig() -> IndexConfig {
-        let canonicalRoots = settings.roots.map(Walk.canonicalPath)
+    func makeConfig(includeLocationAccess: Bool = true) -> IndexConfig {
+        let canonicalRoots = settings.roots.map(Walk.normalizePath)
         var prefixes = settings.builtInExcludedFolders.filter { prefix in
             !canonicalRoots.contains { IndexedVolume.contains(prefix, $0) }
         }
         prefixes.append(indexDirectory)
         for folder in settings.excludedFolders {
             prefixes.append(Walk.normalizePath(folder))
-            prefixes.append(Walk.canonicalPath(folder))
         }
         var seenPrefixes = Set<String>()
         prefixes = prefixes.filter { seenPrefixes.insert($0).inserted }
-        return IndexConfig(
+        var config = IndexConfig(
             roots: settings.roots,
             exclusions: settings.exclusions,
             namePatterns: settings.excludedNamePatterns,
             skipPathPrefixes: prefixes,
             skipDirNames: settings.builtInExcludedDirectoryNames
         )
+        config.defaultSkipPathPrefixes = settings.builtInExcludedFolders
+        config.explicitSkipPathPrefixes = [indexDirectory] + settings.excludedFolders
+        if includeLocationAccess {
+            config.locationAccess = locationAccess
+            config.locationIdentities = settings.locationBindings.map { binding in
+                let keep = settings.locations.first(where: { $0.id == binding.rootID })?.keepIndexWhenUnavailable ?? true
+                return "\(binding.path)\u{0}\(binding.volumeIdentity)\u{0}\(keep)"
+            }.sorted()
+        }
+        return config
     }
 }
