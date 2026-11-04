@@ -77,8 +77,20 @@ public struct IndexerStats: Sendable {
     public var skipped = 0
     public var scannedItems = 0
     public var scannedDirectories = 0
+    public var didChangeIndex = false
 
     public init() {}
+
+    mutating func add(_ other: IndexerStats) {
+        rows += other.rows
+        dirs += other.dirs
+        files += other.files
+        deleted += other.deleted
+        skipped += other.skipped
+        scannedItems += other.scannedItems
+        scannedDirectories += other.scannedDirectories
+        didChangeIndex = didChangeIndex || other.didChangeIndex
+    }
 
     public var total: Int { dirs + files }
 }
@@ -551,13 +563,36 @@ public final class Reconciler: IndexEngine {
         var level: [DirPairCollector.Root] = []
         for root in config.roots {
             if isCancelled() { return }
-            guard let id = try db.ensureDirectoryRow(path: root, roots: indexRoots) else { continue }
             if config.ignores(path: root) {
-                try db.deleteSubtree(id: id)
+                if let id = try db.ensureDirectoryRow(path: root, roots: indexRoots) {
+                    try db.deleteSubtree(id: id)
+                }
                 continue
             }
+            var ancestor = try db.indexedDirectoryAncestor(path: root, roots: indexRoots)
+            if let directory = ancestor, !indexRoots.map(Walk.normalizePath).contains(directory.path),
+               let info = Walk.lstatInfo(directory.path), !info.isDir {
+                ancestor = try db.indexedDirectoryAncestor(path: (directory.path as NSString).deletingLastPathComponent,
+                                                          roots: indexRoots)
+            }
+            let path = ancestor?.path ?? indexRoots.map(Walk.normalizePath).filter {
+                IndexedVolume.contains($0, root)
+            }.min(by: { $0.count < $1.count })
+            guard let path, let id = try db.ensureDirectoryRow(path: path, roots: indexRoots) else { continue }
             guard seenRootIDs.insert(id).inserted else { continue }
-            level.append(DirPairCollector.Root(path: Walk.normalizePath(root), id: id))
+            level.append(DirPairCollector.Root(path: path, id: id))
+        }
+        if scanKnownSubdirectories {
+            let paths = Set(level.map(\.path))
+            level.removeAll { directory in
+                var parent = (directory.path as NSString).deletingLastPathComponent
+                while !parent.isEmpty && parent != directory.path {
+                    if paths.contains(parent) { return true }
+                    if parent == "/" { break }
+                    parent = (parent as NSString).deletingLastPathComponent
+                }
+                return false
+            }
         }
         while !level.isEmpty {
             if isCancelled() { return }
@@ -623,8 +658,9 @@ public final class Reconciler: IndexEngine {
             let failure = errno
             bump { $0.skipped += 1 }
             var info = stat()
-            let missing = lstat(directory, &info) != 0 && (errno == ENOENT || errno == ENOTDIR)
-            if missing {
+            let found = lstat(directory, &info) == 0
+            let missing = !found && (errno == ENOENT || errno == ENOTDIR)
+            if missing || (found && failure == ENOTDIR) {
                 do {
                     try db.deleteSubtree(id: dirID)
                     bump { $0.deleted += existing.count }

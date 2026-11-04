@@ -12,7 +12,7 @@ that indexes filenames and metadata, so you can find files without searching the
 - **Native results:** sortable columns even before searching, saved layouts, highlighted matches, and Quick Look previews.
 - **File actions:** open, reveal in Finder, Get Info, Open With, Open in Terminal, and copy names or paths.
 - **Easy access:** menu bar icon, configurable global shortcut (default **⌥Space**), and launch at login.
-- **Fresh results:** live updates, catch-up after the app was closed, and optional daily, weekly, or monthly full checks.
+- **Fresh results:** low-overhead, batched file-level live updates, catch-up after the app was closed, and optional daily, weekly, or monthly full checks.
 - **Indexing controls:** choose folders and exclusions, pause or resume scans, and search the saved index immediately.
 - **macOS conveniences:** search history, offline help, light/dark appearance, and built-in updates.
 
@@ -63,6 +63,7 @@ Click **?** beside the search field for syntax tips.
 - [User guide](docs/USER_GUIDE.md): setup, search syntax, shortcuts, and troubleshooting.
 - [Changelog](CHANGELOG.md): release changes.
 - [Search performance](docs/SEARCH_PERFORMANCE.md): measurements and limitations.
+- [Live-update performance](docs/MONITORING_PERFORMANCE.md): monitoring benchmarks and safeguards.
 - [Contributor guide](AGENTS.md): architecture and development workflows.
 - [Release guide](docs/RELEASING.md): builds, publishing, signing, and Homebrew tap setup.
 - [Website guide](docs/WEBSITE.md): preview and publishing.

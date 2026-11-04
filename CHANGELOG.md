@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.11.0
+
+- Reduce live-update overhead with direct file-edit checks, bounded batching, and fewer database writes and search refreshes.
+- Fix case-only filename changes, folder replacements, and root recovery while preserving journal replay correctness.
+
 ## 1.10.0
 
 - Fix column sorting in the initial empty-search view; clearing the search restores recent items.

@@ -239,6 +239,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
             self?.compactIndexIfNeeded()
             self?.updateRebuildSuggestion()
         }
+        timer.tolerance = 6
         maintenanceTimer = timer
         RunLoop.main.add(timer, forMode: .common)
         scheduleStartup()
@@ -540,10 +541,14 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                     DispatchQueue.main.async { [weak self] in
                         guard let self, !control.isCancelled else { return }
                         if let count { self.indexedRows = count }
-                        self.indexRevision += 1
-                        self.progressStats.scannedItems += stats.scannedItems
-                        self.progressStats.scannedDirectories += stats.scannedDirectories
-                        self.progressStats.skipped += stats.skipped
+                        if stats.didChangeIndex { self.indexRevision += 1 }
+                        if stats.scannedItems > 0 || stats.scannedDirectories > 0 || stats.skipped > 0 {
+                            var progress = self.progressStats
+                            progress.scannedItems += stats.scannedItems
+                            progress.scannedDirectories += stats.scannedDirectories
+                            progress.skipped += stats.skipped
+                            self.progressStats = progress
+                        }
                         if historyDone {
                             guard self.replayProgress.finish(volume: volume.path) else { return }
                             self.isPaused = false
@@ -601,11 +606,9 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     }
 
     func makeConfig() -> IndexConfig {
+        let canonicalRoots = settings.roots.map(Walk.canonicalPath)
         var prefixes = settings.builtInExcludedFolders.filter { prefix in
-            !settings.roots.contains { root in
-                let canonical = Walk.canonicalPath(root)
-                return canonical == prefix || canonical.hasPrefix(prefix + "/")
-            }
+            !canonicalRoots.contains { IndexedVolume.contains(prefix, $0) }
         }
         prefixes.append(indexDirectory)
         for folder in settings.excludedFolders {

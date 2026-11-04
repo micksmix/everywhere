@@ -106,12 +106,14 @@ public final class Database: @unchecked Sendable {
     private var memoryVersion: Int64 = -1
     private var memoryWriterVersion: Int64?
     private var pendingMemoryChanges = Set<Int64>()
+    private var entryChangeGenerationValue: UInt64 = 0
     private var memoryRequiresFullReload = true
     private var memoryFullLoads = 0
     private var memoryIncrementalRefreshes = 0
     private let lock = NSRecursiveLock()
     private var upsertStatement: OpaquePointer?
     private var fastInsertStatement: OpaquePointer?
+    private var childLookupStatement: OpaquePointer?
     private var bulkMode = false
     private let regexBox = RegexBox()
     private var nextIDValue: Int64 = 1
@@ -146,7 +148,8 @@ public final class Database: @unchecked Sendable {
     CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
         INSERT INTO entries_fts(entries_fts, rowid, name) VALUES ('delete', old.id, old.name);
     END;
-    CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
+    CREATE TRIGGER IF NOT EXISTS entries_au_name AFTER UPDATE OF id, name ON entries
+    WHEN old.id != new.id OR old.name != new.name BEGIN
         INSERT INTO entries_fts(entries_fts, rowid, name) VALUES ('delete', old.id, old.name);
         INSERT INTO entries_fts(rowid, name) VALUES (new.id, new.name);
     END;
@@ -165,7 +168,13 @@ public final class Database: @unchecked Sendable {
         is_dir = excluded.is_dir,
         size = excluded.size,
         modified = excluded.modified
+    WHERE entries.id != excluded.id
+        OR entries.is_dir != excluded.is_dir
+        OR entries.size != excluded.size
+        OR entries.modified != excluded.modified
     """
+
+    private static let childLookupSQL = "SELECT id, '', name, is_dir, size, modified FROM entries WHERE parent = ?1 AND name = ?2"
 
     public init(path: String) throws {
         try Self.removeOutdatedDatabase(at: path)
@@ -214,14 +223,18 @@ public final class Database: @unchecked Sendable {
         try exec(searchReader, "PRAGMA busy_timeout=1000")
         try exec(writer, Self.tableSQL)
         try exec(writer, Self.ftsSQL)
+        try exec(writer, "DROP TRIGGER IF EXISTS entries_au")
         try exec(writer, Self.triggerSQL)
-        try exec(writer, "PRAGMA user_version=\(Self.schemaVersion)")
+        if try pragmaInteger("user_version") != Int64(Self.schemaVersion) {
+            try exec(writer, "PRAGMA user_version=\(Self.schemaVersion)")
+        }
         try exec(searchReader, "PRAGMA cache_size=-8192")
         nextIDValue = (try? loadMaxID()) ?? 1
         sqlite3_update_hook(writer, { context, _, _, table, id in
             guard let context, let table else { return }
             let database = Unmanaged<Database>.fromOpaque(context).takeUnretainedValue()
             guard strcmp(table, "entries") == 0 else { return }
+            database.entryChangeGenerationValue &+= 1
             database.recordMemoryChange(id)
         }, Unmanaged.passUnretained(self).toOpaque())
     }
@@ -252,6 +265,7 @@ public final class Database: @unchecked Sendable {
         sqlite3_update_hook(writer, nil, nil)
         sqlite3_finalize(upsertStatement)
         sqlite3_finalize(fastInsertStatement)
+        sqlite3_finalize(childLookupStatement)
         sqlite3_close(writer)
         sqlite3_close(reader)
         sqlite3_close(searchReader)
@@ -336,6 +350,12 @@ public final class Database: @unchecked Sendable {
             size: size,
             modified: Date(timeIntervalSince1970: Double(modified))
         )
+    }
+
+    var entryChangeGeneration: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return entryChangeGenerationValue
     }
 
     public func nextID() -> Int64 {
@@ -423,6 +443,23 @@ public final class Database: @unchecked Sendable {
         return parent
     }
 
+    func indexedDirectoryAncestor(path: String, roots: [String]) throws -> (path: String, id: Int64)? {
+        let path = Walk.normalizePath(path)
+        guard let root = roots.map(Walk.normalizePath).filter({
+            $0 == path || $0 == "/" || path.hasPrefix($0 + "/")
+        }).min(by: { $0.count < $1.count }) else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = try child(ofParent: 0, name: root == "/" ? "" : root), entry.isDirectory else { return nil }
+        var ancestor = (path: root, id: entry.id)
+        for component in path.dropFirst(root == "/" ? 1 : root.count).split(separator: "/") {
+            let name = String(component)
+            guard let entry = try child(ofParent: ancestor.id, name: name), entry.isDirectory else { break }
+            ancestor = (path: Walk.joinPath(ancestor.path, name), id: entry.id)
+        }
+        return ancestor
+    }
+
     public func beginBulkLoad() throws {
         lock.lock()
         defer { lock.unlock() }
@@ -432,6 +469,7 @@ public final class Database: @unchecked Sendable {
         try exec(writer, "DROP TRIGGER IF EXISTS entries_ai")
         try exec(writer, "DROP TRIGGER IF EXISTS entries_ad")
         try exec(writer, "DROP TRIGGER IF EXISTS entries_au")
+        try exec(writer, "DROP TRIGGER IF EXISTS entries_au_name")
     }
 
     public func endBulkLoad() throws {
@@ -542,6 +580,30 @@ public final class Database: @unchecked Sendable {
         }
     }
 
+    func child(ofParent parent: Int64, name: String) throws -> Entry? {
+        lock.lock()
+        defer { lock.unlock() }
+        if childLookupStatement == nil {
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(writer, Self.childLookupSQL, -1, &statement, nil) == SQLITE_OK, let statement else {
+                throw DatabaseError.sql(Self.errorMessage(writer), sql: Self.childLookupSQL)
+            }
+            childLookupStatement = statement
+        }
+        let statement = childLookupStatement!
+        sqlite3_reset(statement)
+        sqlite3_clear_bindings(statement)
+        defer { sqlite3_reset(statement) }
+        sqlite3_bind_int64(statement, 1, parent)
+        Self.bindText(statement, 2, name)
+        let status = sqlite3_step(statement)
+        if status == SQLITE_ROW { return Self.entry(from: statement) }
+        guard status == SQLITE_DONE else {
+            throw DatabaseError.sql(Self.errorMessage(writer), sql: Self.childLookupSQL)
+        }
+        return nil
+    }
+
     public func children(ofParent parent: Int64) throws -> [Entry] {
         let sql = "SELECT id, parent, name, is_dir, size, modified FROM entries WHERE parent = ?1"
         var statement: OpaquePointer?
@@ -598,6 +660,8 @@ public final class Database: @unchecked Sendable {
         upsertStatement = nil
         sqlite3_finalize(fastInsertStatement)
         fastInsertStatement = nil
+        sqlite3_finalize(childLookupStatement)
+        childLookupStatement = nil
         try exec(writer, "INSERT INTO entries_fts(entries_fts) VALUES('optimize')")
         try exec(writer, "VACUUM")
         try exec(writer, "PRAGMA wal_checkpoint(TRUNCATE)")

@@ -79,6 +79,48 @@ final class IndexCheckpointTests: XCTestCase {
         withExtendedLifetime(db) {}
     }
 
+    func testUnchangedCursorSkipsRewriteAfterFirstSuccessfulSave() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("index.sqlite").path
+        let db = try Database(path: path)
+        let checkpoint = IndexCheckpoint(databasePath: path, config: IndexConfig(roots: ["/"]), volumes: [volume(id: 5)])
+        let writer = IndexCheckpointWriter(checkpoint, databasePath: path)
+        XCTAssertNil(IndexCheckpoint.load(databasePath: path))
+        try writer.commit(volume: "/", eventID: 5, journalEventID: 5)
+        XCTAssertEqual(IndexCheckpoint.load(databasePath: path), checkpoint)
+        let initialIdentity = try XCTUnwrap(IndexCheckpoint.identity(of: path + ".checkpoint"))
+        try writer.commit(volume: "/", eventID: 5, journalEventID: 5)
+        try writer.commit(volume: "/", eventID: 2, journalEventID: 2)
+        try writer.commit(volume: "/unindexed", eventID: 99, journalEventID: 99)
+        XCTAssertEqual(IndexCheckpoint.identity(of: path + ".checkpoint"), initialIdentity)
+        try writer.commit(volume: "/", eventID: 10, journalEventID: 5)
+        let advancedIdentity = try XCTUnwrap(IndexCheckpoint.identity(of: path + ".checkpoint"))
+        XCTAssertNotEqual(advancedIdentity, initialIdentity)
+        XCTAssertEqual(IndexCheckpoint.load(databasePath: path)?.volumeCursors["/"]?.eventID, 10)
+        try writer.commit(volume: "/", eventID: 10, journalEventID: 8)
+        XCTAssertNotEqual(IndexCheckpoint.identity(of: path + ".checkpoint"), advancedIdentity)
+        XCTAssertEqual(IndexCheckpoint.load(databasePath: path)?.volumeCursors["/"]?.journalEventID, 8)
+        withExtendedLifetime(db) {}
+    }
+
+    func testUnchangedFirstCommitRetriesAfterSaveFailure() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("index.sqlite").path
+        let db = try Database(path: path)
+        let checkpoint = IndexCheckpoint(databasePath: path, config: IndexConfig(roots: ["/"]), volumes: [volume(id: 5)])
+        let writer = IndexCheckpointWriter(checkpoint, databasePath: path)
+        let sidecar = path + ".checkpoint"
+        try FileManager.default.createDirectory(atPath: sidecar, withIntermediateDirectories: false)
+        XCTAssertThrowsError(try writer.commit(volume: "/", eventID: 5, journalEventID: 5))
+        XCTAssertEqual(URL(fileURLWithPath: sidecar).standardizedFileURL.path, path + ".checkpoint")
+        try FileManager.default.removeItem(atPath: sidecar)
+        try writer.commit(volume: "/", eventID: 5, journalEventID: 5)
+        XCTAssertEqual(IndexCheckpoint.load(databasePath: path), checkpoint)
+        withExtendedLifetime(db) {}
+    }
+
     func testLegacyHostCursorRequiresNewBaseline() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -365,15 +365,23 @@ unavailable while indexing is disabled. The same control is available in
 Turn it on to keep the index up to date while Everywhere runs. Turn it off to stop ongoing monitoring after any current
 startup catch-up finishes. This setting is separate from pausing an active scan.
 
-Monitoring batches changes: while large builds or sync tools churn thousands of files,
-checks stretch from instant up to a few seconds apart, and a folder checked moments ago
-is not re-checked immediately. Results may lag a few seconds during that churn and settle
-once activity quiets down; ordinary edits still appear within about a second.
-If a folder is replaced by a file at the same path, its former contents disappear
-from results after that folder's parent is checked.
+Monitoring uses macOS file-system notifications rather than repeatedly walking your folders.
+Ordinary file edits check the changed file directly, without listing every sibling.
+Creates, deletes, and renames share a parent-folder check, preserving the actual filename
+spelling even for case-only renames. Unchanged metadata does not rewrite index entries
+or refresh search results; content edits with unchanged indexed metadata need no update.
+
+Changes are batched: during large builds or sync activity, the batching interval grows
+from half a second to at most eight seconds. Recently checked paths can wait briefly for
+a follow-up check. Continuous activity cannot postpone a batch indefinitely, but results
+may lag several seconds under churn; ordinary edits usually appear within about a second.
+Very large bursts can trigger broader recovery checks rather than an unbounded queue.
+New or replaced folders and unreliable event history can also require recursive checks.
+If a folder is replaced by a file or symbolic link, its former contents disappear from
+results without following the replacement link.
 
 At startup, Everywhere catches up on changes recorded while it was closed. A valid saved
-checkpoint lets it check changed directories instead of walking every file again.
+checkpoint lets it reconcile recorded file and folder changes instead of walking every file again.
 Each indexed volume has its own saved position in its event history. Connecting or
 disconnecting an unrelated volume does not force a full check. Mounted volumes inside
 an indexed location are included unless excluded. With live updates enabled, Everywhere

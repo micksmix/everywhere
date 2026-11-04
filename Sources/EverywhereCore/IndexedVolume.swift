@@ -108,12 +108,13 @@ struct IndexedVolume: Equatable, Sendable {
 
     func absolutePath(for relativePath: String) -> String {
         let relative = relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        for mapping in mappings.sorted(by: { $0.relativePath.count > $1.relativePath.count }) {
-            if mapping.relativePath.isEmpty { continue }
+        let mapping = mappings.lazy.filter {
+            !$0.relativePath.isEmpty
+                && (relative == $0.relativePath || relative.hasPrefix($0.relativePath + "/"))
+        }.max { $0.relativePath.count < $1.relativePath.count }
+        if let mapping {
             if relative == mapping.relativePath { return mapping.absolutePath }
-            if relative.hasPrefix(mapping.relativePath + "/") {
-                return Walk.joinPath(mapping.absolutePath, String(relative.dropFirst(mapping.relativePath.count + 1)))
-            }
+            return Walk.joinPath(mapping.absolutePath, String(relative.dropFirst(mapping.relativePath.count + 1)))
         }
         return relative.isEmpty ? path : Walk.joinPath(path, relative)
     }

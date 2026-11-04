@@ -13,6 +13,18 @@ public struct FileSystemEvent: Sendable {
     }
 
     var isHistoryDone: Bool { flags & UInt32(kFSEventStreamEventFlagHistoryDone) != 0 }
+    var isFileItem: Bool {
+        flags & UInt32(kFSEventStreamEventFlagItemIsFile | kFSEventStreamEventFlagItemIsSymlink) != 0
+            && flags & UInt32(kFSEventStreamEventFlagItemIsDir) == 0
+    }
+    var changesFileName: Bool {
+        isFileItem && flags & UInt32(kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemRemoved
+                                     | kFSEventStreamEventFlagItemRenamed) != 0
+    }
+    var isDirectoryReplacement: Bool {
+        flags & UInt32(kFSEventStreamEventFlagItemIsDir) != 0
+            && flags & UInt32(kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemRenamed) != 0
+    }
     var requiresFullScan: Bool {
         flags & UInt32(kFSEventStreamEventFlagUserDropped | kFSEventStreamEventFlagKernelDropped
                        | kFSEventStreamEventFlagEventIdsWrapped) != 0
@@ -44,14 +56,16 @@ public final class FSEventsMonitor: @unchecked Sendable {
     }
 
     public convenience init(roots: [String], since: UInt64 = UInt64(kFSEventStreamEventIdSinceNow),
-                latency: TimeInterval = 0.5, queue: DispatchQueue? = nil,
+                latency: TimeInterval = 0.5, queue: DispatchQueue? = nil, fileEvents: Bool = false,
                 eventsSink: @escaping @Sendable ([FileSystemEvent]) -> Void) {
-        self.init(paths: roots, device: nil, since: since, latency: latency, queue: queue, eventsSink: eventsSink)
+        self.init(paths: roots, device: nil, since: since, latency: latency, queue: queue,
+                  fileEvents: fileEvents, eventsSink: eventsSink)
     }
 
     convenience init(volume: IndexedVolume, since: UInt64, latency: TimeInterval = 0.5,
                      eventsSink: @escaping @Sendable ([FileSystemEvent]) -> Void) {
-        self.init(paths: [volume.relativeWatchPath], device: volume.device, since: since, latency: latency, queue: nil) { events in
+        self.init(paths: [volume.relativeWatchPath], device: volume.device, since: since, latency: latency,
+                  queue: nil, fileEvents: true) { events in
             eventsSink(events.flatMap { event in
                 if event.isHistoryDone { return [event] }
                 if event.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty {
@@ -66,7 +80,8 @@ public final class FSEventsMonitor: @unchecked Sendable {
     }
 
     private init(paths: [String], device: dev_t?, since: UInt64, latency: TimeInterval,
-                 queue: DispatchQueue?, eventsSink: @escaping @Sendable ([FileSystemEvent]) -> Void) {
+                 queue: DispatchQueue?, fileEvents: Bool,
+                 eventsSink: @escaping @Sendable ([FileSystemEvent]) -> Void) {
         self.queue = queue ?? DispatchQueue(label: "app.everywhere.fsevents", qos: .utility)
         callbackBox = CallbackBox(eventsSink)
         guard !paths.isEmpty else { return }
@@ -92,7 +107,8 @@ public final class FSEventsMonitor: @unchecked Sendable {
             box.sink(events)
         }
         let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes
-                                            | kFSEventStreamCreateFlagWatchRoot | kFSEventStreamCreateFlagNoDefer)
+                                            | kFSEventStreamCreateFlagWatchRoot
+                                            | (fileEvents ? kFSEventStreamCreateFlagFileEvents : 0))
         if let device {
             stream = FSEventStreamCreateRelativeToDevice(kCFAllocatorDefault, callback, &context, device,
                                                         paths as CFArray, since, latency, flags)
@@ -130,10 +146,20 @@ public final class FSEventsMonitor: @unchecked Sendable {
 }
 
 public final class ChangeHandler: @unchecked Sendable {
+    private enum ScanScope: Int, CaseIterable {
+        case file, directory, recursive
+    }
+
     private struct PendingChange {
-        var recursive: Bool
+        var scope: ScanScope
         var firstID: UInt64
         var id: UInt64
+
+        mutating func merge(_ other: PendingChange) {
+            if other.scope.rawValue > scope.rawValue { scope = other.scope }
+            firstID = min(firstID, other.firstID)
+            id = max(id, other.id)
+        }
     }
 
     private let db: Database
@@ -143,6 +169,7 @@ public final class ChangeHandler: @unchecked Sendable {
     private let debounce: TimeInterval
     private let maxDebounce: TimeInterval
     private let pathCooldown: TimeInterval
+    private let maxPendingPaths: Int
     private let control: IndexingControl
     private let onCommit: @Sendable (UInt64, Bool, IndexerStats) throws -> Void
     private let onError: @Sendable (Error) -> Void
@@ -154,6 +181,8 @@ public final class ChangeHandler: @unchecked Sendable {
     private var suspended: Bool
     private var stopped = false
     private var flushItem: DispatchWorkItem?
+    private var flushDeadline: DispatchTime?
+    private var pendingIndexChange = false
     private var debounceInterval: TimeInterval
     private var lastFlushEnd: Date?
     private var lastReconciled: [String: Date] = [:]
@@ -162,6 +191,7 @@ public final class ChangeHandler: @unchecked Sendable {
                 maxDebounce: TimeInterval = 8, pathCooldown: TimeInterval = 5,
                 suspended: Bool = false, control: IndexingControl = IndexingControl(),
                 recoveryRoots: [String]? = nil, queue: DispatchQueue? = nil,
+                maxPendingPaths: Int = 16_384,
                 onCommit: @escaping @Sendable (UInt64, Bool, IndexerStats) throws -> Void = { _, _, _ in },
                 onError: @escaping @Sendable (Error) -> Void = { _ in }) {
         self.db = db
@@ -174,6 +204,7 @@ public final class ChangeHandler: @unchecked Sendable {
         self.debounce = debounce
         self.maxDebounce = max(maxDebounce, debounce)
         self.pathCooldown = pathCooldown
+        self.maxPendingPaths = max(1, maxPendingPaths)
         self.suspended = suspended
         self.control = control
         self.onCommit = onCommit
@@ -202,17 +233,21 @@ public final class ChangeHandler: @unchecked Sendable {
                     continue
                 }
                 if event.requiresFullScan {
-                    for root in recoveryRoots { mergePending(root, id: event.id, recursive: true) }
+                    for root in recoveryRoots { mergePending(root, id: event.id, scope: .recursive) }
                     accepted = true
                 } else if let path = indexedPath(event.path), !config.ignores(path: path) {
-                    mergePending(path, id: event.id, recursive: event.requiresRecursiveScan)
+                    let scope: ScanScope = event.requiresRecursiveScan || event.isDirectoryReplacement
+                        ? .recursive : (event.isFileItem && !event.changesFileName ? .file : .directory)
+                    let target = event.changesFileName
+                        ? indexedPath((path as NSString).deletingLastPathComponent) ?? path : path
+                    mergePending(target, id: event.id, scope: scope)
                     accepted = true
                 } else {
                     let ancestor = Self.normalizedPath(event.path)
                     for mapping in rootPaths where IndexedVolume.contains(ancestor, mapping.canonical)
                         || IndexedVolume.contains(ancestor, mapping.path) {
                         guard !config.ignores(path: mapping.path) else { continue }
-                        mergePending(mapping.path, id: event.id, recursive: true)
+                        mergePending(mapping.path, id: event.id, scope: .recursive)
                         accepted = true
                     }
                 }
@@ -221,12 +256,42 @@ public final class ChangeHandler: @unchecked Sendable {
         }
     }
 
-    private func mergePending(_ path: String, id: UInt64, recursive: Bool) {
-        var change = pending[path] ?? PendingChange(recursive: false, firstID: id, id: id)
-        change.recursive = change.recursive || recursive
-        change.firstID = min(change.firstID, id)
-        change.id = max(change.id, id)
-        pending[path] = change
+    private func coveringPath(for path: String, scope: ScanScope) -> String? {
+        var parent = (path as NSString).deletingLastPathComponent
+        var covering: String?
+        var directParent = true
+        while !parent.isEmpty && parent != path {
+            if let change = pending[parent], change.scope == .recursive
+                || (directParent && change.scope == .directory && scope == .file) {
+                covering = parent
+            }
+            if parent == "/" { break }
+            parent = (parent as NSString).deletingLastPathComponent
+            directParent = false
+        }
+        return covering
+    }
+
+    private func mergePending(_ path: String, id: UInt64, scope: ScanScope) {
+        let target = coveringPath(for: path, scope: scope) ?? path
+        let change = PendingChange(scope: scope, firstID: id, id: id)
+        if pending[target] != nil { pending[target]!.merge(change) }
+        else { pending[target] = change }
+        guard pending.count > maxPendingPaths else { return }
+        let first = pending.values.map(\.firstID).min() ?? id
+        let last = pending.values.map(\.id).max() ?? id
+        pending.removeAll(keepingCapacity: true)
+        for root in recoveryRoots {
+            pending[root] = PendingChange(scope: .recursive, firstID: first, id: last)
+        }
+    }
+
+    private func compactPending() {
+        for (path, change) in pending {
+            guard let target = coveringPath(for: path, scope: change.scope) else { continue }
+            pending[target]!.merge(change)
+            pending.removeValue(forKey: path)
+        }
     }
 
     static func normalizedPath(_ path: String) -> String {
@@ -251,7 +316,6 @@ public final class ChangeHandler: @unchecked Sendable {
     }
 
     private func scheduleFlush(after delay: TimeInterval? = nil) {
-        flushItem?.cancel()
         let interval: TimeInterval
         if let delay {
             interval = delay
@@ -262,9 +326,13 @@ public final class ChangeHandler: @unchecked Sendable {
             debounceInterval = debounce
             interval = debounce
         }
+        let deadline = DispatchTime.now() + interval
+        if let scheduled = flushDeadline, scheduled <= deadline { return }
+        flushItem?.cancel()
         let item = DispatchWorkItem { [weak self] in self?.flush() }
         flushItem = item
-        queue.asyncAfter(deadline: .now() + interval, execute: item)
+        flushDeadline = deadline
+        queue.asyncAfter(deadline: deadline, execute: item)
     }
 
     public func resume() {
@@ -283,7 +351,9 @@ public final class ChangeHandler: @unchecked Sendable {
     private func flush(bypassCooldown: Bool = false) {
         flushItem?.cancel()
         flushItem = nil
+        flushDeadline = nil
         guard !stopped, !suspended, !pending.isEmpty || historyDone else { return }
+        compactPending()
         let now = Date()
         if lastReconciled.count > 4096 {
             lastReconciled = lastReconciled.filter { now.timeIntervalSince($0.value) < pathCooldown * 2 }
@@ -296,7 +366,7 @@ public final class ChangeHandler: @unchecked Sendable {
         var earliestEligible: Date?
         for (path, change) in pending {
             let withinCooldown = lastReconciled[path].map { now.timeIntervalSince($0) < pathCooldown } ?? false
-            if !bypass && !change.recursive && withinCooldown {
+            if !bypass && change.scope != .recursive && withinCooldown {
                 deferred[path] = change
                 let eligibleAt = lastReconciled[path]!.addingTimeInterval(pathCooldown)
                 if earliestEligible.map({ eligibleAt < $0 }) ?? true { earliestEligible = eligibleAt }
@@ -305,6 +375,10 @@ public final class ChangeHandler: @unchecked Sendable {
             }
         }
         pending = deferred
+        guard !immediate.isEmpty || completedHistory else {
+            scheduleFollowUp(earliest: earliestEligible)
+            return
+        }
         let eventID: UInt64
         if deferred.isEmpty {
             eventID = max(immediate.values.map(\.id).max() ?? 0, completedHistory ? sentinelID : 0)
@@ -312,34 +386,39 @@ public final class ChangeHandler: @unchecked Sendable {
             let floor = deferred.values.map(\.firstID).min() ?? 0
             eventID = floor > 0 ? floor - 1 : 0
         }
+        let generation = db.entryChangeGeneration
         do {
             var total = IndexerStats()
-            for recursive in [false, true] {
-                let roots = immediate.filter { $0.value.recursive == recursive }.map(\.key)
-                guard !roots.isEmpty else { continue }
-                let reconciler = Reconciler(db: db, config: config, roots: roots, skipUnchangedDirs: false, scanKnownSubdirectories: recursive)
-                try reconciler.run(isCancelled: { !self.control.waitUntilRunning() })
-                let stats = reconciler.snapshot
-                total.rows += stats.rows
-                total.scannedItems += stats.scannedItems
-                total.scannedDirectories += stats.scannedDirectories
-                total.skipped += stats.skipped
+            for scope in ScanScope.allCases {
+                let paths = immediate.filter { $0.value.scope == scope }.map(\.key)
+                guard !paths.isEmpty else { continue }
+                if scope == .file {
+                    let reconciler = FileChangeReconciler(db: db, config: config)
+                    try reconciler.run(paths: paths, isCancelled: { !self.control.waitUntilRunning() })
+                    total.add(reconciler.snapshot)
+                } else {
+                    let reconciler = Reconciler(db: db, config: config, roots: paths,
+                                                skipUnchangedDirs: false, scanKnownSubdirectories: scope == .recursive)
+                    try reconciler.run(isCancelled: { !self.control.waitUntilRunning() })
+                    total.add(reconciler.snapshot)
+                }
             }
             lastFlushEnd = Date()
-            for path in immediate.keys { lastReconciled[path] = lastFlushEnd! }
             guard !control.isCancelled else { return }
+            pendingIndexChange = pendingIndexChange || db.entryChangeGeneration != generation
+            total.didChangeIndex = pendingIndexChange
             try onCommit(eventID, completedHistory, total)
+            pendingIndexChange = false
+            for path in immediate.keys { lastReconciled[path] = lastFlushEnd! }
             historyDone = false
             historyDoneID = 0
             scheduleFollowUp(earliest: earliestEligible)
         } catch {
+            pendingIndexChange = pendingIndexChange || db.entryChangeGeneration != generation
             lastFlushEnd = Date()
             for (path, change) in immediate {
-                var merged = pending[path] ?? change
-                merged.recursive = merged.recursive || change.recursive
-                merged.firstID = min(merged.firstID, change.firstID)
-                merged.id = max(merged.id, change.id)
-                pending[path] = merged
+                if pending[path] != nil { pending[path]!.merge(change) }
+                else { pending[path] = change }
             }
             onError(error)
             scheduleFlush(after: pathCooldown)
@@ -359,6 +438,8 @@ public final class ChangeHandler: @unchecked Sendable {
         queue.sync {
             self.flushItem?.cancel()
             self.flushItem = nil
+            self.flushDeadline = nil
+            self.pendingIndexChange = false
             self.pending = [:]
             self.historyDone = false
             self.historyDoneID = 0

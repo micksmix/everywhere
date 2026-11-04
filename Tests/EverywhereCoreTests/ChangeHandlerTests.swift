@@ -315,6 +315,25 @@ final class ChangeHandlerTests: XCTestCase {
 }
 
 final class FSEventsMonitorTests: XCTestCase {
+    func testMonitorDeliversFileLevelEventsWhenEnabled() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("watched.txt")
+        let expected = Walk.joinPath(Walk.canonicalPath(directory.path), file.lastPathComponent)
+        let delivered = expectation(description: "File-level event with item flags")
+        delivered.assertForOverFulfill = false
+        let monitor = FSEventsMonitor(roots: [directory.path], latency: 0.1, fileEvents: true, eventsSink: { events in
+            if events.contains(where: { Walk.canonicalPath($0.path) == expected && $0.isFileItem }) {
+                delivered.fulfill()
+            }
+        })
+        XCTAssertTrue(monitor.start())
+        defer { monitor.stop() }
+        try Data([1]).write(to: file)
+        wait(for: [delivered], timeout: 10)
+    }
+
     func testMonitorDeliversDirectoryEvents() throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("fsearch-fsevents-\(UUID().uuidString)", isDirectory: true)

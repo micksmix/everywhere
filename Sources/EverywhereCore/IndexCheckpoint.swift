@@ -73,6 +73,7 @@ final class IndexCheckpointWriter: @unchecked Sendable {
     private let lock = NSLock()
     private var checkpoint: IndexCheckpoint
     private let databasePath: String
+    private var hasSaved = false
 
     init(_ checkpoint: IndexCheckpoint, databasePath: String) {
         self.checkpoint = checkpoint
@@ -85,9 +86,11 @@ final class IndexCheckpointWriter: @unchecked Sendable {
         guard var cursor = checkpoint.volumeCursors[volume] else { return }
         cursor.eventID = max(cursor.eventID, eventID)
         cursor.journalEventID = max(cursor.journalEventID, min(cursor.eventID, journalEventID))
+        guard !hasSaved || cursor != checkpoint.volumeCursors[volume] else { return }
         var next = checkpoint
         next.volumeCursors[volume] = cursor
         try next.save(databasePath: databasePath)
         checkpoint = next
+        hasSaved = true
     }
 }
