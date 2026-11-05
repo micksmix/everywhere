@@ -338,7 +338,7 @@ struct SettingsView: View {
     private var liveUpdatesSection: some View {
         Section {
             Toggle("Watch the file system for changes", isOn: Binding(
-                get: { indexService.live },
+                get: { settings.liveUpdates },
                 set: { indexService.setLive($0) }
             ))
             .disabled(!settings.indexingEnabled)
@@ -346,7 +346,7 @@ struct SettingsView: View {
             Text("Live Updates")
         } footer: {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Keeps the index in sync in real time using file system events.")
+                Text("Keeps the index in sync using file system events. The switch saves your choice immediately; monitoring changes take effect after any current scan and startup catch-up finish. The status bar's Live indicator shows when monitoring is running.")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .multilineTextAlignment(.leading)

@@ -226,6 +226,22 @@ public class IndexEngine {
         self.buffer = RowBuffer(db: db, limit: config.batchSize)
     }
 
+    static let maximumDirectoryWorkers = 2
+
+    static func forEachDirectory(_ directories: [DirPairCollector.Root], isCancelled: @Sendable () -> Bool,
+                                 operation: @Sendable (DirPairCollector.Root) -> Void) {
+        let workers = min(maximumDirectoryWorkers, directories.count)
+        guard workers > 0 else { return }
+        DispatchQueue.concurrentPerform(iterations: workers) { worker in
+            var index = worker
+            while index < directories.count {
+                if isCancelled() { return }
+                operation(directories[index])
+                index += workers
+            }
+        }
+    }
+
     var snapshot: IndexerStats {
         statsLock.lock()
         defer { statsLock.unlock() }
@@ -539,10 +555,8 @@ public final class FilesystemIndexer: IndexEngine {
         while !level.isEmpty {
             if isCancelled() { return }
             let collector = DirPairCollector()
-            let dirs = level
-            DispatchQueue.concurrentPerform(iterations: dirs.count) { index in
-                if isCancelled() { return }
-                self.walk(directory: dirs[index].path, parentID: dirs[index].id, collector: collector, isCancelled: isCancelled, progress: progress)
+            Self.forEachDirectory(level, isCancelled: isCancelled) { directory in
+                self.walk(directory: directory.path, parentID: directory.id, collector: collector, isCancelled: isCancelled, progress: progress)
             }
             try buffer.flush()
             try checkError()
@@ -660,10 +674,8 @@ public final class Reconciler: IndexEngine {
         while !level.isEmpty {
             if isCancelled() { return }
             let collector = DirPairCollector()
-            let dirs = level
-            DispatchQueue.concurrentPerform(iterations: dirs.count) { index in
-                if isCancelled() { return }
-                self.reconcile(directory: dirs[index].path, dirID: dirs[index].id, collector: collector, isCancelled: isCancelled, progress: progress)
+            Self.forEachDirectory(level, isCancelled: isCancelled) { directory in
+                self.reconcile(directory: directory.path, dirID: directory.id, collector: collector, isCancelled: isCancelled, progress: progress)
             }
             try buffer.flush()
             try flushDeletes()

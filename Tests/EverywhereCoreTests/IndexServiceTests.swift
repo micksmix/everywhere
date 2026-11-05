@@ -1,4 +1,5 @@
 import Combine
+import SQLite3
 import XCTest
 @testable import EverywhereCore
 
@@ -16,6 +17,119 @@ final class IndexServiceTests: XCTestCase {
         XCTAssertEqual(IndexSettings(defaults: defaults).fullCheckInterval.seconds, 30 * 86400)
     }
 
+    @MainActor
+    func testLiveUpdatesChangesPreserveRunningAndPausedStartupDelays() async throws {
+        for paused in [false, true] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let suite = "EverywhereTests.\(UUID())"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            defaults.set(directory.appendingPathComponent("db/index.sqlite").path, forKey: "IndexDatabasePath")
+            let settings = IndexSettings(defaults: defaults)
+            settings.roots = [directory.path]
+            settings.startupDelay = 3600
+            let db = try Database(path: settings.indexPath)
+            try TestTree(db: db).add(path: "/saved.txt")
+            let service = IndexService(settings: settings, database: db)
+            defer { service.setIndexingEnabled(false) }
+            let loaded = expectation(description: "Saved index loads before startup delay changes")
+            let subscription = service.$hasLoadedIndexCount.filter { $0 }.prefix(1).sink { _ in loaded.fulfill() }
+            service.startIfNeeded()
+            await fulfillment(of: [loaded], timeout: 10)
+            if paused { service.togglePause() }
+            let seconds = service.countdownSeconds
+            XCTAssertGreaterThan(seconds, 0)
+            for enabled in [false, true, false, true] {
+                service.setLive(enabled)
+                XCTAssertEqual(settings.liveUpdates, enabled)
+                XCTAssertEqual(IndexSettings(defaults: defaults).liveUpdates, enabled)
+                XCTAssertFalse(service.live)
+                XCTAssertEqual(service.phase, .waiting)
+                XCTAssertEqual(service.isPaused, paused)
+                XCTAssertEqual(service.countdownSeconds, seconds)
+            }
+            if paused {
+                service.updateCountdown(now: Date().addingTimeInterval(7200))
+                XCTAssertEqual(service.phase, .waiting)
+                XCTAssertTrue(service.isPaused)
+                XCTAssertEqual(service.countdownSeconds, seconds)
+            }
+            withExtendedLifetime(subscription) {}
+        }
+    }
+
+    @MainActor
+    func testLiveUpdatesPreferenceTogglesDuringPausedScanAndAppliesAfterCatchUp() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = directory.appendingPathComponent("files")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1]).write(to: root.appendingPathComponent("example.txt"))
+        let suite = "EverywhereTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(directory.appendingPathComponent("db/index.sqlite").path, forKey: "IndexDatabasePath")
+        let settings = IndexSettings(defaults: defaults)
+        settings.roots = [root.path]
+        let db = try Database(path: settings.indexPath)
+        let service = IndexService(settings: settings, database: db)
+        defer { service.setIndexingEnabled(false) }
+        let monitoring = expectation(description: "Baseline starts suspended monitoring")
+        let monitorSubscription = service.$live.filter { $0 }.prefix(1).sink { _ in
+            service.togglePause()
+            monitoring.fulfill()
+        }
+        service.rebuild()
+        service.togglePause()
+        XCTAssertTrue(settings.liveUpdates)
+        XCTAssertFalse(service.live)
+        service.setLive(false)
+        XCTAssertFalse(settings.liveUpdates)
+        XCTAssertFalse(IndexSettings(defaults: defaults).liveUpdates)
+        service.setLive(true)
+        XCTAssertTrue(settings.liveUpdates)
+        XCTAssertTrue(IndexSettings(defaults: defaults).liveUpdates)
+        XCTAssertFalse(service.live)
+        XCTAssertTrue(service.isPaused)
+        XCTAssertEqual(service.phase, .indexing)
+        service.togglePause()
+        await fulfillment(of: [monitoring], timeout: 10)
+        XCTAssertTrue(service.live)
+        XCTAssertTrue(service.isPaused)
+        XCTAssertEqual(service.phase, .indexing)
+        service.setLive(false)
+        XCTAssertFalse(settings.liveUpdates)
+        XCTAssertFalse(IndexSettings(defaults: defaults).liveUpdates)
+        XCTAssertTrue(service.live)
+        XCTAssertTrue(service.isPaused)
+        XCTAssertEqual(service.phase, .indexing)
+        let finished = expectation(description: "Scan and catch-up finish with live updates disabled")
+        let finishSubscription = service.$phase.dropFirst().filter { $0 == .idle }.prefix(1).sink { _ in finished.fulfill() }
+        service.togglePause()
+        await fulfillment(of: [finished], timeout: 10)
+        XCTAssertFalse(settings.liveUpdates)
+        XCTAssertFalse(service.live)
+        XCTAssertFalse(service.isPaused)
+        XCTAssertNil(service.lastError)
+        XCTAssertEqual(try db.search(SearchRequest(text: "example")).total, 1)
+        XCTAssertNotNil(IndexCheckpoint.load(databasePath: db.path))
+        let resumed = expectation(description: "Live updates can be enabled again from idle")
+        let resumeSubscription = service.$phase.dropFirst().filter { $0 == .idle }.prefix(1).sink { _ in resumed.fulfill() }
+        service.setLive(true)
+        XCTAssertTrue(settings.liveUpdates)
+        XCTAssertTrue(IndexSettings(defaults: defaults).liveUpdates)
+        await fulfillment(of: [resumed], timeout: 10)
+        XCTAssertTrue(service.live)
+        XCTAssertNil(service.lastError)
+        service.setLive(false)
+        XCTAssertFalse(settings.liveUpdates)
+        XCTAssertFalse(service.live)
+        XCTAssertEqual(service.phase, .idle)
+        withExtendedLifetime((monitorSubscription, finishSubscription, resumeSubscription)) {}
+    }
+
     func testReplayWaitsForEveryVolumeAndIgnoresDuplicateCompletion() {
         var replay = JournalReplayProgress(volumes: ["/", "/Volumes/Work"])
         XCTAssertFalse(replay.finish(volume: "/"))
@@ -24,6 +138,184 @@ final class IndexServiceTests: XCTestCase {
         XCTAssertEqual(replay.pendingVolumes, ["/Volumes/Work"])
         XCTAssertTrue(replay.finish(volume: "/Volumes/Work"))
         XCTAssertFalse(replay.finish(volume: "/Volumes/Work"))
+    }
+
+    func testBaselineFailureWaitsForChangedSnapshotOrExplicitRetry() {
+        let config = IndexConfig(roots: ["/indexed"])
+        let volume = IndexedVolume(path: "/", device: 1, journalIdentity: "journal", journalEventID: 10,
+                                   roots: config.roots, mappings: [.init(relativePath: "", absolutePath: "/")])
+        var state = IndexReconciliationState()
+        state.beginAttempt(config: config, volumes: [volume])
+        state.failBaseline()
+        XCTAssertTrue(state.baselineFailed)
+        for eventID in [UInt64(10), 20, 30] {
+            var current = volume
+            current.journalEventID = eventID
+            XCTAssertFalse(state.needsReconciliation(config: config, volumes: [current], compareTopology: true))
+        }
+        var replacement = volume
+        replacement.journalIdentity = "replacement"
+        XCTAssertTrue(state.needsReconciliation(config: config, volumes: [replacement], compareTopology: true))
+        state.beginAttempt(config: config, volumes: [replacement])
+        XCTAssertFalse(state.baselineFailed)
+        XCTAssertFalse(state.needsReconciliation(config: config, volumes: [replacement], compareTopology: true))
+        state.failBaseline()
+        state.prepareForRetry()
+        XCTAssertFalse(state.baselineFailed)
+    }
+
+    func testAttemptSnapshotConsumesCoveredChangesButPreservesNewerTopology() {
+        let config = IndexConfig(roots: ["/indexed"])
+        let first = IndexedVolume(path: "/", device: 1, journalIdentity: "first", journalEventID: 10,
+                                  roots: config.roots, mappings: [.init(relativePath: "", absolutePath: "/")])
+        var second = first
+        second.journalIdentity = "second"
+        var state = IndexReconciliationState()
+        state.beginAttempt(config: config, volumes: [first])
+        XCTAssertTrue(state.needsReconciliation(config: config, volumes: [second], compareTopology: true))
+        state.beginAttempt(config: config, volumes: [second])
+        XCTAssertFalse(state.needsReconciliation(config: config, volumes: [second], compareTopology: true))
+        XCTAssertTrue(state.needsReconciliation(config: config, volumes: [], compareTopology: true))
+        XCTAssertFalse(state.needsReconciliation(config: config, volumes: [second], compareTopology: true))
+    }
+
+    func testReconciliationSnapshotDetectsAccessAndConfigurationChangesWithoutLiveUpdates() {
+        var config = IndexConfig(roots: ["/indexed", "/other"])
+        config.locationAccess = [
+            .init(path: "/indexed", device: 1, isAvailable: true, identity: "journal"),
+            .init(path: "/other", device: 2, isAvailable: true, identity: "other")
+        ]
+        config.locationIdentities = ["retained"]
+        var state = IndexReconciliationState()
+        state.beginAttempt(config: config, volumes: [])
+        var current = config
+        current.locationAccess.reverse()
+        XCTAssertFalse(state.needsReconciliation(config: current, volumes: [], compareTopology: false))
+        current = config
+        current.locationAccess[0].isAvailable = false
+        XCTAssertTrue(state.needsReconciliation(config: current, volumes: [], compareTopology: false))
+        current = config
+        current.locationAccess[0].identity = "replacement"
+        XCTAssertTrue(state.needsReconciliation(config: current, volumes: [], compareTopology: false))
+        current = config
+        current.locationIdentities = ["remove-offline"]
+        XCTAssertTrue(state.needsReconciliation(config: current, volumes: [], compareTopology: false))
+        current = config
+        current.exclusions = ["excluded"]
+        XCTAssertTrue(state.needsReconciliation(config: current, volumes: [], compareTopology: false))
+        XCTAssertFalse(state.needsReconciliation(config: config, volumes: [], compareTopology: false))
+    }
+
+    @MainActor
+    func testCheckpointFailurePreservesServiceHandlerBatchForTargetedRetry() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = directory.appendingPathComponent("files")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suite = "EverywhereTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = IndexSettings(defaults: defaults)
+        settings.roots = [root.path]
+        let db = try Database(path: directory.appendingPathComponent("db/index.sqlite").path)
+        let service = IndexService(settings: settings, database: db)
+        defer { service.setIndexingEnabled(false) }
+        let healthyRoot = root.appendingPathComponent("healthy")
+        try FileManager.default.createDirectory(at: healthyRoot, withIntermediateDirectories: true)
+        let config = service.makeConfig(includeLocationAccess: false).preparingFilesystemPaths()
+        try FilesystemIndexer(db: db, config: config).run()
+        let volume = IndexedVolume(path: root.path, device: try XCTUnwrap(IndexedVolume.device(containing: root.path)),
+                                   journalIdentity: "test", journalEventID: 0, roots: config.roots,
+                                   mappings: [.init(relativePath: "", absolutePath: root.path)])
+        let healthyVolume = IndexedVolume(path: healthyRoot.path, device: volume.device,
+                                          journalIdentity: "healthy", journalEventID: 0, roots: [healthyRoot.path],
+                                          mappings: [.init(relativePath: "", absolutePath: healthyRoot.path)])
+        let checkpoint = IndexCheckpoint(databasePath: db.path, config: config, volumes: [volume, healthyVolume])
+        let writer = IndexCheckpointWriter(checkpoint, databasePath: db.path)
+        let handler = service.makeChangeHandler(volume: volume, config: config, writer: writer)
+        defer { handler.stop() }
+        let healthyHandler = service.makeChangeHandler(volume: healthyVolume, config: config, writer: writer)
+        defer { healthyHandler.stop(cancelControl: false) }
+        service.noteMonitoringUnavailable()
+        let monitoringWarning = try XCTUnwrap(service.lastError)
+        try Data([1]).write(to: root.appendingPathComponent("pending.txt"))
+        let sidecar = db.path + ".checkpoint"
+        try FileManager.default.createDirectory(atPath: sidecar, withIntermediateDirectories: false)
+        let failed = expectation(description: "Checkpoint error is surfaced")
+        let failure = service.$lastError.dropFirst().compactMap { $0 }.prefix(1).sink { _ in failed.fulfill() }
+        handler.ingest(events: [FileSystemEvent(path: root.path, id: 42, flags: 0)])
+        handler.flushPendingNow()
+        await fulfillment(of: [failed], timeout: 10)
+        XCTAssertNil(IndexCheckpoint.load(databasePath: db.path))
+        XCTAssertEqual(try db.search(SearchRequest(text: "pending")).total, 1)
+        let revision = service.indexRevision
+        let handlerError = try XCTUnwrap(service.lastError)
+        XCTAssertNotEqual(handlerError, monitoringWarning)
+        XCTAssertEqual(URL(fileURLWithPath: sidecar).standardizedFileURL.path, db.path + ".checkpoint")
+        try FileManager.default.removeItem(atPath: sidecar)
+        healthyHandler.ingest(events: [FileSystemEvent(path: healthyRoot.path, id: 21, flags: 0)])
+        healthyHandler.flushPendingNow()
+        let healthyCommitted = expectation(description: "Healthy handler publishes its successful commit")
+        DispatchQueue.main.async { healthyCommitted.fulfill() }
+        await fulfillment(of: [healthyCommitted], timeout: 10)
+        XCTAssertEqual(IndexCheckpoint.load(databasePath: db.path)?.volumeCursors[healthyRoot.path]?.eventID, 21)
+        XCTAssertEqual(IndexCheckpoint.load(databasePath: db.path)?.volumeCursors[root.path]?.eventID, 0)
+        XCTAssertEqual(service.lastError, handlerError)
+        let recovered = expectation(description: "Owner retry restores the unsupported-monitor warning")
+        let recovery = service.$lastError.dropFirst().filter { $0 == monitoringWarning }.prefix(1).sink { _ in recovered.fulfill() }
+        handler.flushPendingNow()
+        await fulfillment(of: [recovered], timeout: 10)
+        withExtendedLifetime((failure, recovery)) {}
+        XCTAssertEqual(IndexCheckpoint.load(databasePath: db.path)?.volumeCursors[root.path]?.eventID, 42)
+        XCTAssertGreaterThan(service.indexRevision, revision)
+        XCTAssertEqual(service.lastError, monitoringWarning)
+    }
+
+    @MainActor
+    func testFailedBaselineDoesNotRetryFromOverdueScheduleAndAllowsExplicitRebuild() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = directory.appendingPathComponent("files")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suite = "EverywhereTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = IndexSettings(defaults: defaults)
+        settings.roots = [root.path]
+        settings.startupDelay = 0
+        settings.liveUpdates = false
+        settings.fullCheckInterval = .daily
+        let db = try Database(path: directory.appendingPathComponent("db/index.sqlite").path)
+        try Data([1]).write(to: root.appendingPathComponent("existing.txt"))
+        try FilesystemIndexer(db: db, config: IndexConfig(roots: [root.path])).run()
+        try Data([2]).write(to: root.appendingPathComponent("pending.txt"))
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(db.path, &handle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil), SQLITE_OK)
+        let connection = try XCTUnwrap(handle)
+        defer { sqlite3_close(connection) }
+        XCTAssertEqual(sqlite3_exec(connection, "CREATE TRIGGER fail_pending BEFORE INSERT ON entries WHEN NEW.name = 'pending.txt' BEGIN SELECT RAISE(FAIL, 'injected baseline failure'); END", nil, nil, nil), SQLITE_OK)
+        let service = IndexService(settings: settings, database: db)
+        defer { service.setIndexingEnabled(false) }
+        let failed = expectation(description: "Baseline failure is surfaced")
+        let failure = service.$lastError.compactMap { $0 }.filter { $0.contains("injected baseline failure") }
+            .prefix(1).sink { _ in failed.fulfill() }
+        service.startIfNeeded()
+        await fulfillment(of: [failed], timeout: 10)
+        XCTAssertEqual(service.phase, .idle)
+        XCTAssertNil(IndexCheckpoint.load(databasePath: db.path))
+        for day in 1...3 {
+            service.checkScheduledFullCheck(now: Date().addingTimeInterval(Double(day) * 86400))
+            XCTAssertEqual(service.phase, .idle)
+        }
+        XCTAssertEqual(sqlite3_exec(connection, "DROP TRIGGER fail_pending", nil, nil, nil), SQLITE_OK)
+        let rebuilt = expectation(description: "Explicit retry completes")
+        let completion = service.$phase.dropFirst().filter { $0 == .idle }.prefix(1).sink { _ in rebuilt.fulfill() }
+        service.rebuild()
+        XCTAssertEqual(service.phase, .indexing)
+        await fulfillment(of: [rebuilt], timeout: 10)
+        withExtendedLifetime((failure, completion)) {}
+        XCTAssertNil(service.lastError)
+        XCTAssertEqual(try db.search(SearchRequest(text: "pending")).total, 1)
     }
 
     @MainActor

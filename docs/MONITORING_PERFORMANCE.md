@@ -1,5 +1,42 @@
 # Live-update performance
 
+## 2026-11-04: bounded scan CPU and stable recovery
+
+Measured on the same Mac16,5 using a disposable release-mode XCTest fixture before
+and after the scan/recovery changes. The tree had 40 groups containing 2,000 leaf
+directories and 8,000 files (10,041 indexed rows including the root). Both runs used
+real local-volume access validation, isolated SQLite databases, and warm filesystem
+caches. CPU time is process user plus system time from `getrusage`; wall time uses
+`ProcessInfo.systemUptime`. Fixture creation was outside the timed sections.
+
+| Work | Before wall s | After wall s | Before CPU s | After CPU s |
+| --- | ---: | ---: | ---: | ---: |
+| 4,000 location validations | 0.262 | 0.219 | 0.169 | 0.157 |
+| Initial indexing | 0.367 | 0.301 | 1.974 | 0.409 |
+| Three unchanged full reconciliations | 0.985 | 0.812 | 5.838 | 1.152 |
+
+Initial indexing used **79% less CPU time**; unchanged reconciliation used **80% less**.
+Both were also faster in elapsed time on this fixture. Directory enumeration now uses
+at most two workers instead of one dispatch iteration per directory, reducing parallel
+filesystem work and shared-reader contention. Per-directory volume identity guards
+read the local filesystem UUID directly instead of querying the FSEvents daemon;
+checks before and after enumeration, including replacement detection, remain in place.
+Journal UUID validation for persistent checkpoints is unchanged.
+
+A separate isolated service fixture with live FSEvents monitoring enabled consumed
+0.0107 CPU seconds during 6.030 wall seconds after startup settled (about 0.18% of one
+CPU core). This short observation includes a location-availability poll; it is not a
+long-running measurement of the user's app, UI searches, a full-disk scan, remote
+volumes, or sustained filesystem churn. Results are single synthetic measurements,
+not a universal CPU ceiling: two directory workers do not cap all process activity.
+The throwaway benchmark was removed afterward.
+
+Service regression tests also cover unchanged attempted topology after failure,
+newer topology/access/configuration changes, overdue scheduled checks after failure,
+explicit retry, preserving targeted live-update work across a checkpoint error, and keeping
+one volume's successful commit from clearing another volume's failure or monitoring warning.
+Unchanged availability polls no longer escalate those failures into repeated full scans.
+
 ## 2026-11-03: file edits without sibling scans
 
 Measured with a disposable XCTest fixture on Mac16,5 (16 logical CPUs, 48 GiB RAM),

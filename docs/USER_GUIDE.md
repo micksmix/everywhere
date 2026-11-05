@@ -430,14 +430,18 @@ The spinner indicates activity, not a percentage or an estimated finish time.
 ## Manage live updates and startup checks
 
 Use the **Live Updates** switch in the window's bottom status bar to toggle monitoring.
-The switch shows the actual state: it is on (and the status bar shows a green **Live** dot)
-only while the file system is being watched, and off when monitoring is stopped. It is
-unavailable while indexing is disabled. The same control is available in
+The switch shows your saved on/off choice immediately, including during startup or a
+paused scan. The separate green **Live** dot indicates that monitoring is running; an
+on switch with **Live updates inactive** means monitoring has not started or is unavailable.
+The switch is unavailable while indexing is disabled. The same control is available in
 **Settings… → Indexing → Live Updates → Watch the file system for changes**.
-Turn it on to keep the index up to date while Everywhere runs. Turn it off to stop ongoing monitoring after any current
-startup catch-up finishes. This setting is separate from pausing an active scan.
+Turn it on to keep the index up to date while Everywhere runs. Turn it off to stop ongoing
+monitoring after any current scan and startup catch-up finish. This setting is separate
+from pausing an active scan and does not cancel or resume that scan or bypass a startup delay.
 
 Monitoring uses macOS file-system notifications rather than repeatedly walking your folders.
+Full scans use at most two directory workers, leaving more CPU
+available for other apps. Large first scans can still take time; pause them if needed.
 Ordinary file edits check the changed file directly, without listing every sibling.
 Creates, deletes, and renames share a parent-folder check, preserving the actual filename
 spelling even for case-only renames. Unchanged metadata does not rewrite index entries
@@ -474,6 +478,13 @@ A full check can still occur when:
 
 The seven-day rule is checked at launch; it is not a scheduled weekly background job.
 An upgrade from a version without per-volume checkpoints needs one full check to establish its baseline.
+
+If a full scan fails, Everywhere shows the error instead of repeatedly restarting the same
+scan on availability polls or scheduled checks. After fixing the cause, choose **Rebuild Index**
+or turn indexing off and on to retry. A detected change to an indexed location can also
+start a new check. Failed live-update batches keep their pending work for retry without
+forcing a new whole-index baseline. A recovery batch that already requires a recursive
+check can repeat that check until its error is fixed.
 
 ### Schedule full checks
 

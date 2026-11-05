@@ -15,6 +15,38 @@ struct JournalReplayProgress {
     }
 }
 
+struct IndexReconciliationState {
+    private var config: IndexConfig?
+    private var volumes: [IndexedVolume] = []
+    private(set) var baselineFailed = false
+
+    mutating func prepareForRetry() {
+        baselineFailed = false
+    }
+
+    mutating func beginAttempt(config: IndexConfig, volumes: [IndexedVolume]) {
+        self.config = config
+        self.volumes = volumes
+        baselineFailed = false
+    }
+
+    mutating func failBaseline() {
+        baselineFailed = true
+    }
+
+    func needsReconciliation(config current: IndexConfig, volumes currentVolumes: [IndexedVolume],
+                             compareTopology: Bool) -> Bool {
+        guard let config else { return true }
+        guard config.hasSameLogicalConfiguration(as: current),
+              config.skipPathPrefixes == current.skipPathPrefixes,
+              config.locationAccess.sorted(by: { $0.path < $1.path })
+                == current.locationAccess.sorted(by: { $0.path < $1.path }),
+              config.locationIdentities == current.locationIdentities else { return true }
+        return compareTopology && (volumes.count != currentVolumes.count
+            || !zip(volumes, currentVolumes).allSatisfy { $0.hasSameTopology(as: $1) })
+    }
+}
+
 public final class IndexService: ObservableObject, @unchecked Sendable {
     public enum Phase: Equatable {
         case waiting
@@ -38,7 +70,8 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     @Published public private(set) var locationStatuses: [IndexLocationStatus] = []
     private var locationAccess: [IndexLocationAccess] = []
     private var locationRefreshRunning = false
-    private var locationReconciliationNeeded = false
+    private var reconciliationState = IndexReconciliationState()
+    private var baselineControl: IndexingControl?
     private let locationQueue = DispatchQueue(label: "app.everywhere.locations", qos: .utility)
     private var locationTimer: Timer?
     private var locationSettingsSubscription: AnyCancellable?
@@ -70,7 +103,8 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
 
     private var monitors: [FSEventsMonitor] = []
     private var changeHandlers: [ChangeHandler] = []
-    private var monitoredVolumes: [IndexedVolume] = []
+    private var changeHandlerErrors: [UUID: String] = [:]
+    private var monitoringWarning: String?
     private var replayProgress = JournalReplayProgress()
     private var lastFullCheckDate: Date?
     private var activeControl = IndexingControl()
@@ -298,7 +332,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     public func checkScheduledFullCheck(now: Date = Date()) {
         guard started, automaticIndexingAllowed, settings.indexingEnabled, launchAccessState == .ready,
               !settings.needsLocationSetup, phase == .idle, !isCompacting,
-              scheduledFullCheckIsDue(now: now) else { return }
+              !reconciliationState.baselineFailed, scheduledFullCheckIsDue(now: now) else { return }
         reconcileAndMonitor()
     }
 
@@ -320,9 +354,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
             let config = config.preparingFilesystemPaths()
             let mounts = mountedVolumes()
             let resolution = IndexLocationResolver.resolve(locations: locations, bindings: bindings, config: config, mounts: mounts)
-            var resolvedConfig = config
-            resolvedConfig.roots = resolution.locations.map(\.path)
-            resolvedConfig.locationAccess = resolution.access
+            let resolvedConfig = resolution.applying(to: config)
             let volumes = IndexedVolume.discover(config: resolvedConfig, mounts: mounts)
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -334,21 +366,15 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                     self.refreshLocationAvailability()
                     return
                 }
-                let availabilityChanged = self.locationStatuses.map { [$0.path, String($0.isAvailable)] }
-                    != resolution.statuses.map { [$0.path, String($0.isAvailable)] }
-                let topologyChanged = volumes.count != self.monitoredVolumes.count
-                    || !zip(volumes, self.monitoredVolumes).allSatisfy { $0.hasSameTopology(as: $1) }
-                let retentionChanged = self.locationStatuses.contains { old in
-                    !old.isAvailable && old.keepIndexWhenUnavailable
-                        && resolution.statuses.contains { $0.id == old.id && !$0.keepIndexWhenUnavailable }
-                }
-                let needsReconciliation = availabilityChanged || retentionChanged || !resolution.relocations.isEmpty
-                    || (self.settings.liveUpdates && topologyChanged) || self.locationReconciliationNeeded
+                let needsReconciliation = self.reconciliationState.needsReconciliation(
+                    config: resolvedConfig, volumes: volumes, compareTopology: self.settings.liveUpdates
+                )
                 self.publishLocations(resolution, committed: false, applyBindings: !self.isBusy)
-                if needsReconciliation { self.locationReconciliationNeeded = true }
-                if self.started, self.automaticIndexingAllowed, self.settings.indexingEnabled, self.phase == .idle, !self.isCompacting,
+                let canReplaceReplay = self.phase == .reconciling && !self.isPaused
+                    && self.preparationControl == nil && self.baselineControl == nil
+                if self.started, self.automaticIndexingAllowed, self.settings.indexingEnabled,
+                   self.phase == .idle || canReplaceReplay, !self.isCompacting,
                    !self.settings.needsLocationSetup, needsReconciliation {
-                    self.locationReconciliationNeeded = false
                     self.reconcileAndMonitor()
                 }
             }
@@ -450,7 +476,8 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     }
 
     private func beginCatchUp() {
-        locationReconciliationNeeded = false
+        reconciliationState.prepareForRetry()
+        baselineControl = nil
         cancelCountdown()
         activeControl.cancel()
         let control = IndexingControl()
@@ -540,7 +567,8 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
     }
 
     private func beginIndexing(rebuild: Bool, preservingPause: Bool = false) {
-        locationReconciliationNeeded = false
+        reconciliationState.prepareForRetry()
+        baselineControl = nil
         activeControl.cancel()
         stopMonitor()
         IndexCheckpoint.remove(databasePath: database.path)
@@ -567,10 +595,14 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                 let config = config.preparingFilesystemPaths()
                 let mounts = mountedVolumes()
                 let resolution = IndexLocationResolver.resolve(locations: locations, bindings: bindings, config: config, mounts: mounts)
+                let scanConfig = resolution.applying(to: config)
+                let volumes = IndexedVolume.discover(config: scanConfig, mounts: mounts)
+                let checkpoint = IndexCheckpoint(databasePath: db.path, config: scanConfig, volumes: volumes)
                 let authorized = DispatchQueue.main.sync { [weak self] in
                     guard let self, !control.isCancelled, self.activeControl === control,
                           self.settings.locations == locations, self.settings.locationBindings == bindings,
                           self.makeConfig(includeLocationAccess: false).hasSameLogicalConfiguration(as: config) else { return false }
+                    self.reconciliationState.beginAttempt(config: scanConfig, volumes: volumes)
                     self.settings.recordRetiredLocations(resolution.relocations.map(\.to))
                     return true
                 }
@@ -590,9 +622,6 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                     guard control.waitUntilRunning() else { return }
                     try db.removeIndexedSubtree(path: path, roots: lookupRoots, preservingSubtreesAt: protected)
                 }
-                let scanConfig = resolution.applying(to: config)
-                let volumes = IndexedVolume.discover(config: scanConfig, mounts: mounts)
-                let checkpoint = IndexCheckpoint(databasePath: db.path, config: scanConfig, volumes: volumes)
                 DispatchQueue.main.async { [weak self] in
                     guard let self, !control.isCancelled else { return }
                     guard self.settings.locations == locations, self.settings.locationBindings == bindings,
@@ -610,11 +639,14 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
-                    guard !control.isCancelled else { return }
-                    self?.lastError = String(describing: error)
-                    self?.isPaused = false
-                    self?.phase = .idle
-                    self?.refreshLocationAvailability()
+                    guard let self, !control.isCancelled else { return }
+                    control.cancel()
+                    self.preparationControl = nil
+                    self.reconciliationState.failBaseline()
+                    self.lastError = String(describing: error)
+                    self.isPaused = false
+                    self.phase = .idle
+                    self.refreshLocationAvailability()
                 }
             }
         }
@@ -622,6 +654,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
 
     private func runBaseline(rebuild: Bool, config: IndexConfig, checkpoint: IndexCheckpoint,
                              monitoring: Bool, control: IndexingControl, preserved: [String]) {
+        baselineControl = control
         let db = database
         indexingQueue.async { [weak self] in
             guard control.waitUntilRunning() else { return }
@@ -667,6 +700,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                 DispatchQueue.main.async { [weak self] in
                     guard !control.isCancelled else { return }
                     guard let self else { return }
+                    self.baselineControl = nil
                     self.indexedRows = count
                     self.indexRevision += 1
                     self.isPaused = false
@@ -686,14 +720,15 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
-                    guard !control.isCancelled else { return }
+                    guard let self, !control.isCancelled else { return }
                     control.cancel()
-                    self?.stopMonitor()
-                    self?.locationReconciliationNeeded = true
+                    self.stopMonitor()
+                    self.baselineControl = nil
+                    self.reconciliationState.failBaseline()
                     IndexCheckpoint.remove(databasePath: db.path)
-                    self?.lastError = String(describing: error)
-                    self?.isPaused = false
-                    self?.phase = .idle
+                    self.lastError = String(describing: error)
+                    self.isPaused = false
+                    self.phase = .idle
                 }
             }
         }
@@ -710,64 +745,73 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
             live = true
             return
         }
-        if phase == .waiting {
-            cancelCountdown()
-        }
-        guard phase == .waiting || phase == .idle else { return }
+        guard phase == .idle else { return }
         beginCatchUp()
+    }
+
+    func noteMonitoringUnavailable() {
+        monitoringWarning = "Some locations do not support file-system monitoring. They refresh on reconnection and full checks."
+        if changeHandlerErrors.isEmpty { lastError = monitoringWarning }
+    }
+
+    func makeChangeHandler(volume: IndexedVolume, config: IndexConfig, writer: IndexCheckpointWriter,
+                           suspended: Bool = false) -> ChangeHandler {
+        let handlerID = UUID()
+        let control = activeControl
+        let db = database
+        return ChangeHandler(db: db, config: config, suspended: suspended, control: control,
+            recoveryRoots: volume.roots, queue: changesQueue,
+            onCommit: { [weak self] eventID, historyDone, stats in
+                guard !control.isCancelled else { return }
+                try writer.commit(volume: volume.path, eventID: eventID,
+                                  journalEventID: IndexedVolume.currentJournalEventID(device: volume.device))
+                let count = historyDone ? try db.count() : nil
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !control.isCancelled else { return }
+                    if self.changeHandlerErrors.removeValue(forKey: handlerID) != nil {
+                        self.lastError = self.changeHandlerErrors.values.first ?? self.monitoringWarning
+                    }
+                    if let count { self.indexedRows = count }
+                    if stats.didChangeIndex { self.indexRevision += 1 }
+                    if stats.scannedItems > 0 || stats.scannedDirectories > 0 || stats.skipped > 0 {
+                        var progress = self.progressStats
+                        progress.scannedItems += stats.scannedItems
+                        progress.scannedDirectories += stats.scannedDirectories
+                        progress.skipped += stats.skipped
+                        self.progressStats = progress
+                    }
+                    if historyDone {
+                        guard self.replayProgress.finish(volume: volume.path) else { return }
+                        self.isPaused = false
+                        self.phase = .idle
+                        self.live = self.settings.liveUpdates
+                        if !self.settings.liveUpdates { self.stopMonitor() }
+                        self.noteScanFinished()
+                        self.compactIndexIfNeeded()
+                        self.updateRebuildSuggestion()
+                    }
+                }
+            }, onError: { [weak self] error in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !control.isCancelled else { return }
+                    let message = String(describing: error)
+                    self.changeHandlerErrors[handlerID] = message
+                    self.lastError = message
+                }
+            })
     }
 
     private func startMonitor(checkpoint: IndexCheckpoint, suspended: Bool = false,
                               config: IndexConfig, volumes: [IndexedVolume]) -> Bool {
         guard monitors.isEmpty else { return true }
-        let control = activeControl
         let db = database
-        monitoredVolumes = volumes
+        reconciliationState.beginAttempt(config: config, volumes: volumes)
         guard !volumes.isEmpty, Set(volumes.map(\.path)) == Set(checkpoint.volumeCursors.keys) else { return false }
         replayProgress = JournalReplayProgress(volumes: volumes.map(\.path))
         let writer = IndexCheckpointWriter(checkpoint, databasePath: db.path)
         for volume in volumes {
             guard let cursor = checkpoint.volumeCursors[volume.path] else { return false }
-            let handler = ChangeHandler(db: db, config: config, suspended: suspended, control: control,
-                recoveryRoots: volume.roots, queue: changesQueue,
-                onCommit: { [weak self] eventID, historyDone, stats in
-                    guard !control.isCancelled else { return }
-                    try writer.commit(volume: volume.path, eventID: eventID,
-                                      journalEventID: IndexedVolume.currentJournalEventID(device: volume.device))
-                    let count = historyDone ? try db.count() : nil
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self, !control.isCancelled else { return }
-                        if let count { self.indexedRows = count }
-                        if stats.didChangeIndex { self.indexRevision += 1 }
-                        if stats.scannedItems > 0 || stats.scannedDirectories > 0 || stats.skipped > 0 {
-                            var progress = self.progressStats
-                            progress.scannedItems += stats.scannedItems
-                            progress.scannedDirectories += stats.scannedDirectories
-                            progress.skipped += stats.skipped
-                            self.progressStats = progress
-                        }
-                        if historyDone {
-                            guard self.replayProgress.finish(volume: volume.path) else { return }
-                            self.isPaused = false
-                            self.phase = .idle
-                            self.live = self.settings.liveUpdates
-                            if !self.settings.liveUpdates { self.stopMonitor() }
-                            self.noteScanFinished()
-                            self.compactIndexIfNeeded()
-                            self.updateRebuildSuggestion()
-                        }
-                    }
-                }, onError: { [weak self] error in
-                    DispatchQueue.main.async { [weak self] in
-                        guard !control.isCancelled else { return }
-                        control.cancel()
-                        self?.stopMonitor()
-                        self?.locationReconciliationNeeded = true
-                        self?.phase = .idle
-                        self?.isPaused = false
-                        self?.lastError = String(describing: error)
-                    }
-                })
+            let handler = makeChangeHandler(volume: volume, config: config, writer: writer, suspended: suspended)
             let since = suspended || volume.journalIdentity == nil ? UInt64(kFSEventStreamEventIdSinceNow) : cursor.eventID
             let monitor = FSEventsMonitor(volume: volume, since: since) { events in
                 handler.ingest(events: events)
@@ -775,7 +819,7 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
             guard monitor.start() else {
                 monitor.stop()
                 handler.stop(cancelControl: false)
-                lastError = "Some locations do not support file-system monitoring. They refresh on reconnection and full checks."
+                noteMonitoringUnavailable()
                 if suspended {
                     _ = replayProgress.finish(volume: volume.path)
                     continue
@@ -803,6 +847,8 @@ public final class IndexService: ObservableObject, @unchecked Sendable {
         monitors = []
         changeHandlers.forEach { $0.stop() }
         changeHandlers = []
+        changeHandlerErrors = [:]
+        monitoringWarning = nil
         replayProgress = JournalReplayProgress()
         live = false
     }

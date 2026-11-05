@@ -14,8 +14,8 @@ that indexes filenames and metadata, so you can find files without searching the
 - **Native results:** sortable columns even before searching, saved layouts, highlighted matches, and Quick Look previews.
 - **File actions:** open, reveal in Finder, Get Info, Open With, Open in Terminal, and copy names or paths.
 - **Easy access:** menu bar icon, recordable global shortcut including punctuation (default **⌥Space**), and launch at login.
-- **Fresh results:** low-overhead, batched file-level live updates, catch-up after the app was closed, and optional daily, weekly, or monthly full checks.
-- **Indexing controls:** choose folders and exclusions, pause or resume scans, and search the saved index immediately.
+- **Fresh results:** low-overhead, batched file-level live updates, catch-up after the app was closed, and optional daily, weekly, or monthly full checks. Live Updates switches remember your choice during startup and scans.
+- **Indexing controls:** choose folders and exclusions, pause or resume scans, and search the saved index immediately. Background scans use limited parallelism instead of saturating every CPU core.
 - **macOS conveniences:** search history, offline help, light/dark appearance, and built-in updates.
 
 ## Install

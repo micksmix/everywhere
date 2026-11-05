@@ -1,5 +1,6 @@
 import Combine
 import CoreServices
+import Darwin
 import XCTest
 @testable import EverywhereCore
 
@@ -197,6 +198,85 @@ final class IndexLocationTests: XCTestCase {
                                    identityForPath: { _ in "journal:expected" }))
         XCTAssertFalse(bound.permits("/Volumes/Work/file", deviceForPath: { _ in 2 }, isDirectory: { _ in true },
                                     identityForPath: { _ in "journal:replacement" }))
+    }
+}
+
+final class IndexedVolumeValidationTests: XCTestCase {
+    private func mountInfo(fileSystem: String = "apfs", source: String = "/dev/disk4s1", device: Int32 = 2,
+                           secondaryDevice: Int32 = 7, local: Bool = true) -> statfs {
+        var info = statfs()
+        info.f_flags = local ? UInt32(MNT_LOCAL) : 0
+        info.f_fsid.val = (device, secondaryDevice)
+        withUnsafeMutableBytes(of: &info.f_fstypename) { $0.copyBytes(from: Array(fileSystem.utf8) + [0]) }
+        withUnsafeMutableBytes(of: &info.f_mntfromname) { $0.copyBytes(from: Array(source.utf8) + [0]) }
+        withUnsafeMutableBytes(of: &info.f_mntonname) { $0.copyBytes(from: Array("/Volumes/Work".utf8) + [0]) }
+        return info
+    }
+
+    func testLocalValidationReadsVolumeUUIDAtMountRoot() {
+        var info = mountInfo()
+        var calls = 0
+        let identity = IndexedVolume.validationIdentity(info: &info, path: "/Volumes/Work/nested/directory", volumeUUIDForPath: { path in
+            calls += 1
+            XCTAssertEqual(path, "/Volumes/Work")
+            return "11111111-2222-3333-4444-AABBCCDDEEFF"
+        })
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(identity, "uuid:11111111-2222-3333-4444-aabbccddeeff")
+    }
+
+    func testLocalValidationRejectsSameDeviceAndSourceWithDifferentVolumeUUID() {
+        var info = mountInfo()
+        let original = IndexedVolume.validationIdentity(info: &info, path: "/Volumes/Work", volumeUUIDForPath: { _ in
+            "11111111-2222-3333-4444-555555555555"
+        })
+        let replacement = IndexedVolume.validationIdentity(info: &info, path: "/Volumes/Work", volumeUUIDForPath: { _ in
+            "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        })
+        let access = IndexLocationAccess(path: "/Volumes/Work", device: 2, isAvailable: true, identity: original)
+        XCTAssertTrue(access.permits("/Volumes/Work/file", deviceForPath: { _ in 2 }, isDirectory: { _ in true },
+                                     identityForPath: { _ in original }))
+        XCTAssertFalse(access.permits("/Volumes/Work/file", deviceForPath: { _ in 2 }, isDirectory: { _ in true },
+                                      identityForPath: { _ in replacement }))
+    }
+
+    func testUUIDLessValidationUsesCompleteMountFingerprint() {
+        func identity(_ info: statfs) -> String {
+            var info = info
+            return IndexedVolume.validationIdentity(info: &info, path: "/Volumes/Work", volumeUUIDForPath: { _ in nil })
+        }
+        let original = identity(mountInfo())
+        XCTAssertEqual(original, identity(mountInfo()))
+        XCTAssertNotEqual(original, identity(mountInfo(device: 3)))
+        XCTAssertNotEqual(original, identity(mountInfo(secondaryDevice: 8)))
+        XCTAssertNotEqual(original, identity(mountInfo(source: "/dev/disk5s1")))
+        XCTAssertNotEqual(original, identity(mountInfo(fileSystem: "hfs")))
+    }
+
+    func testNetworkValidationDoesNotRequestLocalVolumeUUID() {
+        var info = mountInfo(fileSystem: "smbfs", source: "//user:secret@Server/Share", local: false)
+        let identity = IndexedVolume.validationIdentity(info: &info, path: "/Volumes/Work", volumeUUIDForPath: { _ in
+            XCTFail("Network validation must not request a local volume UUID")
+            return nil
+        })
+        XCTAssertEqual(identity, "share:smbfs:server/Share")
+        var replacement = mountInfo(fileSystem: "smbfs", source: "//Server/OtherShare", local: false)
+        XCTAssertNotEqual(identity, IndexedVolume.validationIdentity(info: &replacement, path: "/Volumes/Work", volumeUUIDForPath: { _ in nil }))
+    }
+
+    func testDirectVolumeUUIDMatchesFilesystemResourceValue() throws {
+        let path = FileManager.default.temporaryDirectory.path
+        var info = statfs()
+        XCTAssertEqual(statfs(path, &info), 0)
+        let expected = try URL(fileURLWithPath: path).resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString
+        guard let expected, !expected.isEmpty else { throw XCTSkip("Temporary volume does not expose a UUID") }
+        var direct: String?
+        let identity = IndexedVolume.validationIdentity(info: &info, path: path, volumeUUIDForPath: { mountPath in
+            direct = IndexedVolume.volumeUUID(at: mountPath)
+            return direct
+        })
+        XCTAssertEqual(direct, expected.lowercased())
+        XCTAssertEqual(identity, "uuid:" + expected.lowercased())
     }
 }
 

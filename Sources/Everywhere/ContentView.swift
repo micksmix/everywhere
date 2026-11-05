@@ -139,7 +139,7 @@ struct ContentView: View {
                         .frame(width: 6, height: 6)
                     Text("Live")
                 } else {
-                    Text("Live updates off")
+                    Text(settings.liveUpdates ? "Live updates inactive" : "Live updates off")
                 }
             }
         }
@@ -160,7 +160,7 @@ struct ContentView: View {
                     indexState
                 }
                 Toggle("Live Updates", isOn: Binding(
-                    get: { indexService.live },
+                    get: { settings.liveUpdates },
                     set: { indexService.setLive($0) }
                 ))
                 .toggleStyle(.switch)

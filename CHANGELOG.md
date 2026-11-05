@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.12.2
+
+- Fix Live Updates switches to show the saved preference immediately, including during startup and paused scans; preserve startup delays and keep the live-monitoring indicator separate.
+- Reduce scan CPU usage by limiting directory work to two workers and validating local volume identities without per-directory FSEvents daemon calls; see [scan CPU measurements](docs/MONITORING_PERFORMANCE.md#2026-11-04-bounded-scan-cpu-and-stable-recovery).
+- Prevent unchanged location polls and overdue scheduled checks from repeatedly restarting failed full scans; retry after fixing the cause by rebuilding or re-enabling indexing.
+- Preserve failed live-update batches for targeted retry instead of escalating errors into a new whole-index baseline.
+- Keep one volume's successful updates from clearing another volume's failure, and restore unsupported-monitoring warnings after recovery.
+
 ## 1.12.1
 
 - Fix CI compilation by simplifying indexed-root ordering.

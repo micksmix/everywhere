@@ -125,25 +125,47 @@ struct IndexedVolume: Equatable, Sendable {
         return validationIdentity(info: &info, path: path)
     }
 
-    private static func validationIdentity(info: inout statfs, path: String) -> String {
+    static func validationIdentity(info: inout statfs, path: String,
+                                   volumeUUIDForPath: (String) -> String? = localVolumeUUID(at:)) -> String {
         let fileSystem = withUnsafePointer(to: &info.f_fstypename) {
             $0.withMemoryRebound(to: CChar.self, capacity: Int(MFSTYPENAMELEN)) { String(cString: $0) }
         }
+        let source = withUnsafePointer(to: &info.f_mntfromname) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+        }
         if info.f_flags & UInt32(MNT_LOCAL) == 0 || ["smbfs", "nfs", "afpfs", "webdav"].contains(fileSystem.lowercased()) {
-            let source = withUnsafePointer(to: &info.f_mntfromname) {
-                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
-            }
             return networkIdentity(fileSystem: fileSystem, source: source)
                 ?? "session:\(unidentifiedSession):\(info.f_fsid.val.0)"
         }
-        if let uuid = FSEventsCopyUUIDForDevice(info.f_fsid.val.0) {
-            return "journal:" + (CFUUIDCreateString(nil, uuid) as String).lowercased()
+        let mountPath = withUnsafePointer(to: &info.f_mntonname) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
         }
-        if let values = try? URL(fileURLWithPath: path).resourceValues(forKeys: [.volumeUUIDStringKey]),
-           let uuid = values.volumeUUIDString, !uuid.isEmpty {
+        if let uuid = volumeUUIDForPath(mountPath.isEmpty ? path : mountPath), !uuid.isEmpty {
             return "uuid:" + uuid.lowercased()
         }
-        return "session:\(unidentifiedSession):\(info.f_fsid.val.0)"
+        return "session:\(unidentifiedSession):\(info.f_fsid.val.0):\(info.f_fsid.val.1):\(fileSystem):\(source)"
+    }
+
+    static func volumeUUID(at path: String) -> String? {
+        var attributes = attrlist()
+        attributes.bitmapcount = UInt16(ATTR_BIT_MAP_COUNT)
+        attributes.volattr = attrgroup_t(ATTR_VOL_INFO) | attrgroup_t(ATTR_VOL_UUID)
+        let headerSize = MemoryLayout<UInt32>.size
+        let bufferSize = headerSize + MemoryLayout<uuid_t>.size
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+        guard getattrlist(path, &attributes, &buffer, bufferSize, 0) == 0,
+              buffer[headerSize...].contains(where: { $0 != 0 }) else { return nil }
+        return buffer.withUnsafeBytes { raw in
+            guard raw.loadUnaligned(as: UInt32.self) == UInt32(bufferSize) else { return nil }
+            return UUID(uuid: raw.loadUnaligned(fromByteOffset: headerSize, as: uuid_t.self)).uuidString.lowercased()
+        }
+    }
+
+    private static func localVolumeUUID(at path: String) -> String? {
+        if let uuid = volumeUUID(at: path) { return uuid }
+        guard let values = try? URL(fileURLWithPath: path).resourceValues(forKeys: [.volumeUUIDStringKey]),
+              let uuid = values.volumeUUIDString, !uuid.isEmpty else { return nil }
+        return uuid.lowercased()
     }
 
     static func device(containing path: String) -> dev_t? {
