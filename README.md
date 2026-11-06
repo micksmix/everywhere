@@ -1,36 +1,19 @@
 # Everywhere
 
-Instant file and folder search for macOS 13 and later. Everywhere is a native app
-that indexes filenames and metadata, so you can find files without searching their contents.
+Instant file and folder search, built for macOS. Find files as you type, narrow the
+results, and preview or open what you need. Everywhere indexes **filenames and
+metadata—not file contents**.
 
-![Everywhere main window searching Swift sources with a folder scope and extension filter, sorted by size](docs/everywhere-01.png)
+**macOS 13+ · Apple Silicon and Intel**
 
-## Features
+![Everywhere in light mode: report ext:pdf finds PDF reports, with matching names highlighted and results sorted by modification date](<docs/search-light.png>)
 
-- **Search as you type:** filename fragments, wildcards, regex, boolean queries, and path matching.
-- **Useful filters:** files or folders, extension, type, size, modification date, and folder scope.
-- **Saved scopes:** fast index-only filtering of named folder sets and reusable search expressions, with pinned favorites and a default scope.
-- **Offline volumes:** classify local, network, and removable locations; optionally retain disconnected indexes and refresh them on reconnection.
-- **Native results:** sortable columns even before searching, saved layouts, highlighted matches, and Quick Look previews.
-- **File actions:** open, reveal in Finder, Get Info, Open With, Open in Terminal, and copy files, names, or paths. With results focused, **⌘C** copies selected files for Finder Paste and **⇧⌘C** copies their paths; search-field text copying stays native.
-- **Easy access:** menu bar icon that opens/restores the window or minimizes it back to the menu bar, not the Dock; recordable global shortcut including punctuation (default **⌥Space**); and launch at login.
-- **Fresh results:** low-overhead, batched file-level live updates, catch-up after the app was closed, and optional daily, weekly, or monthly full checks. Live Updates switches remember your choice during startup and scans.
-- **Indexing controls:** choose folders and exclusions, pause or resume scans, and search the saved index immediately. Background scans use limited parallelism instead of saturating every CPU core.
-- **macOS conveniences:** search history, offline help, light/dark appearance, and built-in updates.
-
-## Screenshots
-
-Right-click any result for file actions, including Quick Look previews:
-
-![Context menu with Open, Open With, Open in Terminal, Show in Finder, Quick Look, Get Info, and copy actions](docs/everywhere-02.png)
-
-Indexing stays under your control — startup delay, live updates, scheduled full checks, and manual rebuilds:
-
-![Settings Indexing pane with indexing enable and startup delay, live updates, full checks, and rebuild controls](docs/everywhere-03.png)
+*Find a report by name and extension. Native app captures use an illustrative sample index.*
 
 ## Install
 
-Install the latest release into `/Applications`:
+[Download the latest release](https://github.com/micksmix/everywhere/releases/latest),
+unzip it, and drag Everywhere to Applications. Or install it with:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/micksmix/everywhere/main/Scripts/install.sh | sh
@@ -48,7 +31,51 @@ Update through **Everywhere → Check for Updates…** or Homebrew.
 The app is signed ad hoc and is not notarized. If macOS blocks the first launch,
 allow it in **System Settings → Privacy & Security → Open Anyway**.
 
-### Build from source
+## Your first search
+
+1. Launch Everywhere and choose **Home folder**, **Entire Mac**, or specific
+   folders to index.
+2. For more complete results, grant **Full Disk Access** from **Settings → File
+   Access**, then quit and reopen Everywhere. If you've already indexed, use
+   **Reindex Accessible Files** in that pane.
+3. Type a filename fragment. **Return** selects the first result; **↑/↓** moves
+   through results. Press **Return** again to open, or **Space** for Quick Look.
+
+Bring the window back with the menu bar icon or **⌥Space** while Everywhere is
+running. The shortcut is customizable, and launch at login is optional.
+
+### A few searches to try
+
+| Search | Finds |
+| --- | --- |
+| `report ext:pdf` | PDF files with “report” in the name |
+| `type:image size:>10MB` | Images larger than 10 MB |
+| `in:~/Documents dm:pastweek` | Items in Documents modified in the past week |
+
+Click **?** beside the search field for tips, or read the
+[search guide](<docs/USER_GUIDE.md#find-a-file-or-folder>).
+
+## Built for your workflow
+
+- **Search your way.** Filename fragments, wildcards, regex, boolean queries, and
+  path matching, plus filters for type, size, date, and folder.
+- **Keep projects in reach.** Save named folder sets and search expressions as
+  scopes, then pin favorites or choose a default. Switching scopes filters the
+  index without starting a scan.
+- **Do more from the results.** Sort columns, preview with Quick Look, open in
+  another app or Terminal, reveal in Finder, and copy files, names, or paths.
+- **Find files on disconnected drives.** Retain the last indexed metadata for
+  removable and network volumes. Reconnect the drive to open or preview a file.
+- **Control the background work.** Choose folders and exclusions, pause or resume
+  scans, and search the saved index immediately. Live updates, startup catch-up,
+  and optional scheduled checks keep supported locations current.
+
+![Everywhere in dark mode: a pinned Photos scope and the native context menu with Open, Show in Finder, Quick Look, and copy actions](<docs/file-actions-dark.png>)
+
+*Right-click a result for native file actions. With results focused, **⌘C** copies
+files for Finder Paste; **⇧⌘C** copies their paths.*
+
+## Build from source
 
 Requires Swift 5.9+, Apple's macOS build tools, Python 3, and
 [Pandoc](https://pandoc.org/installing.html) (`brew install pandoc`).
@@ -60,32 +87,19 @@ open .build/Everywhere.app
 ```
 
 Use `make install` to build and copy the app to `/Applications`.
-
-For contributors, `make test-performance` runs the small search/indexing performance
-regressions in release mode. They also run with `make test` and assert work/storage
-budgets rather than machine-specific timings. See [performance coverage and known hotspots](docs/SEARCH_PERFORMANCE.md#performance-regression-coverage--november-5-2026).
-
-## First use
-
-1. Choose **Home folder**, **Entire Mac**, or specific folders to index.
-2. For complete results, grant **Full Disk Access** in **Settings → File Access**, then quit and reopen Everywhere.
-3. Type a filename fragment. Press **Return** to select the first result, use **↑/↓** to navigate, then press **Return** again to open. Double-click also opens; **Space** in results shows Quick Look.
-
-Try `report ext:pdf`, `type:image size:>10MB`, or `in:~/Documents dm:pastweek`.
-Click **?** beside the search field for syntax tips.
+For contributors, `make test-performance` runs the search/indexing regression tests
+in release mode. See [performance coverage and limitations](<docs/SEARCH_PERFORMANCE.md#performance-regression-coverage--november-5-2026>).
 
 ## Documentation
 
-- [User guide](docs/USER_GUIDE.md): setup, search syntax, shortcuts, and troubleshooting.
-- [Changelog](CHANGELOG.md): release changes.
-- [Search performance](docs/SEARCH_PERFORMANCE.md): measurements and limitations.
-- [Live-update performance](docs/MONITORING_PERFORMANCE.md): monitoring benchmarks and safeguards.
-- [Contributor guide](AGENTS.md): architecture and development workflows.
-- [Release guide](docs/RELEASING.md): builds, publishing, signing, and Homebrew tap setup.
-- [Website guide](docs/WEBSITE.md): preview and publishing.
+- [User guide](<docs/USER_GUIDE.md>): setup, search syntax, shortcuts, and troubleshooting. Also available offline from the app's Help menu.
+- [Changelog](<CHANGELOG.md>): release changes.
+- [Search performance](<docs/SEARCH_PERFORMANCE.md>) and [live-update performance](<docs/MONITORING_PERFORMANCE.md>): measurements, safeguards, and limitations.
+- [Contributor guide](<AGENTS.md>): architecture and development workflows.
+- [Release guide](<docs/RELEASING.md>) and [website guide](<docs/WEBSITE.md>): building and publishing.
 
 ## Credits and license
 
 Inspired by [Everything](https://www.voidtools.com/) and
 [FSearch](https://github.com/cboxdoerfer/fsearch); independently implemented for macOS.
-Licensed under [Apache 2.0](LICENSE).
+Licensed under [Apache 2.0](<LICENSE>).
