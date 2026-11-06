@@ -3,7 +3,7 @@
 Instant file and folder search for macOS 13 and later. Everywhere is a native app
 that indexes filenames and metadata, so you can find files without searching their contents.
 
-![Everywhere search results](docs/everywhere-01.png)
+![Everywhere main window searching Swift sources with a folder scope and extension filter, sorted by size](docs/everywhere-01.png)
 
 ## Features
 
@@ -17,6 +17,16 @@ that indexes filenames and metadata, so you can find files without searching the
 - **Fresh results:** low-overhead, batched file-level live updates, catch-up after the app was closed, and optional daily, weekly, or monthly full checks. Live Updates switches remember your choice during startup and scans.
 - **Indexing controls:** choose folders and exclusions, pause or resume scans, and search the saved index immediately. Background scans use limited parallelism instead of saturating every CPU core.
 - **macOS conveniences:** search history, offline help, light/dark appearance, and built-in updates.
+
+## Screenshots
+
+Right-click any result for file actions, including Quick Look previews:
+
+![Context menu with Open, Open With, Open in Terminal, Show in Finder, Quick Look, Get Info, and copy actions](docs/everywhere-02.png)
+
+Indexing stays under your control — startup delay, live updates, scheduled full checks, and manual rebuilds:
+
+![Settings Indexing pane with indexing enable and startup delay, live updates, full checks, and rebuild controls](docs/everywhere-03.png)
 
 ## Install
 
