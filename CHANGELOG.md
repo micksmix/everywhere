@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.13.0
+
+- Make Return in the search field select the first result and focus the list without opening anything; use arrow keys to navigate and Return again to open ([#5](https://github.com/micksmix/everywhere/issues/5)).
+- Use the filename cache for scoped name searches, with reusable index-only folder membership, exact counts, and consistent filtering and sorting; switching locations does not scan or re-index files ([#4](https://github.com/micksmix/everywhere/issues/4)).
+- Make the menu bar icon toggle the search window: click to open or restore it, then click again to minimize it. The global shortcut and **Open Everywhere** menu action continue to bring the window forward without minimizing it.
+- Add fast performance regressions for search work, cache reuse, directory-rank storage, and batched live-update storms, with a focused `make test-performance` command.
+- Apply saved scope filters before regex evaluation and retain folder-membership caches across file-only updates, avoiding unnecessary search work during live changes.
+
 ## 1.12.2
 
 - Fix Live Updates switches to show the saved preference immediately, including during startup and paused scans; preserve startup delays and keep the live-monitoring indicator separate.

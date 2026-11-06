@@ -103,4 +103,18 @@ continuous arrivals, checkpoint retry behavior, exclusions, and real file-level 
 Database tests also verify FTS stability for metadata-only updates and incremental memory-cache
 correctness when row IDs change.
 
+### Repeatable operation budgets — November 5, 2026
+
+The six [indexing performance regressions](../Tests/EverywhereCoreTests/IndexingPerformanceTests.swift)
+run with `make test` or the release-mode `make test-performance` target. They use
+isolated temporary trees of at most 192 files and synthetic batches of up to 2,048
+events, exercising real batching/reconciliation without sleeps or live FSEvents streams.
+Assertions budget unique point checks, scanned directories/items, row writes/deletions,
+search snapshot changes, and incremental/full cache refreshes. Duplicate replay and
+unchanged bulk/POSIX directory walks must not write or invalidate the search cache.
+Other budgets cover overlapping recursive events, new-subtree discovery, unrelated
+branches, and pending-overflow recovery across multiple roots. These budgets passed
+without indexing implementation changes; they guard against future work amplification,
+not absolute CPU or I/O latency. See [search measurements and remaining hotspots](SEARCH_PERFORMANCE.md#performance-regression-coverage--november-5-2026).
+
 For enabling monitoring and expected freshness, see [the user guide](USER_GUIDE.md#manage-live-updates-and-startup-checks).

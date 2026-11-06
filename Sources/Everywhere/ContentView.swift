@@ -54,7 +54,8 @@ struct ContentView: View {
             SearchField(text: $viewModel.searchText, focusToken: viewModel.focusToken,
                         onHistory: { viewModel.navigateHistory(backward: $0) },
                         onEndEditing: { viewModel.rememberSearch() }) {
-                viewModel.openSelection()
+                viewModel.rememberSearch()
+                viewModel.focusResults?()
             }
             .frame(minWidth: 160, idealWidth: 260, maxWidth: .infinity)
             Picker("Search scope", selection: $viewModel.selectedScopeID) {

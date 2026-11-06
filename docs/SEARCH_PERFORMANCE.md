@@ -1,8 +1,8 @@
 # Search performance measurements
 
-Measured September 15–16 and October 5, 2026 on the development Mac using disposable synthetic indexes.
+Dated measurements from September–November 2026 on the development Mac using disposable synthetic indexes.
 Sections describe the implementation at the time of each measurement; the final section
-records result-highlighting improvements.
+covers repeatable performance regressions, newly measured improvements, and open hotspots.
 No real user index was opened or modified. These are local measurements, not latency or
 memory guarantees for every disk, filename distribution, or folder depth.
 
@@ -433,3 +433,176 @@ not predict deep trees, real network latency, cold starts, or end-to-end typing.
 The temporary benchmark was removed. Permanent tests cover escaped regex literals,
 Unicode case folding, shared names, scope unions/negation/OR, recent-item ties,
 pagination, cancellation, and memory/disk parity after updates.
+
+## Cached location scopes — November 5, 2026
+
+A disposable release XCTest indexed one million synthetic files across 1,000 folders,
+with half under `/benchmark/Home` and half under `/benchmark/NAS`. Every hundredth
+name was `project_<number>_unit.pas`; the others were
+`workspace_<number>_component_filename.swift`. Each search requested 200 rows with
+exact totals and returned paths. The filename index was prepared first; the table
+reports medians of five identical searches after one warm-up, before and after the
+scoped-cache fix.
+
+| Search | Before | After |
+| --- | ---: | ---: |
+| All: missing literal, memory | 0.064 ms | 0.066 ms |
+| Home: missing literal, memory | 132.95 ms | 0.037 ms |
+| All: `unit`, memory, 10,000 matches | 0.50 ms | 0.55 ms |
+| Home: `unit`, memory, 5,000 matches | 124.06 ms | 0.52 ms |
+| Disk (`/benchmark`): `unit`, memory | 194.31 ms | 0.62 ms |
+| NAS: saved `ext:pas \| ext:swift` plus `unit`, memory | 211.03 ms | 0.54 ms |
+| Home: regex `unit\.pas$`, memory | 317.87 ms | 13.47 ms |
+| Home: empty recent-items search, memory enabled | 198.69 ms | 201.09 ms |
+| Home: `unit`, disk mode | 126.27 ms | 132.37 ms |
+
+Repeated filename queries can reuse completed candidates, now including scoped and
+metadata-filtered results. The table was recorded after directory-membership caching;
+a final follow-up also eliminated duplicate name matching across identical OR groups.
+To separate candidate reuse from scope filtering itself, that follow-up invalidated
+the candidate list before each timed search while retaining folder memberships.
+Fresh `unit` searches took 17.69 ms for All, 20.16 ms for Home, 20.25 ms for Disk,
+and 21.67 ms for NAS with its saved OR expression. A fresh missing Home query took
+1.86 ms. First-use Home membership construction plus the missing query took 2.65 ms
+in the table's run, with the filename index already loaded. These are not cold
+database or application-startup measurements.
+
+Folder scopes now expand cached directory parent IDs, retaining at most three
+recent memberships; repeated restrictions within one query share the same sets.
+Memberships and directory ancestry are invalidated on cache patches or reloads.
+No per-file full paths, filesystem scans, network requests, or re-indexing are
+needed to filter a scope. Paths are reconstructed only for the returned page.
+The three cached memberships plus directory ancestry added an estimated 49,191 bytes
+of allocated ID/key storage on this fixture, not whole-process resident memory or
+all temporary/container overhead. The database remained exactly 179,789,824 bytes
+before and after, with no schema or persistent index changes.
+
+Empty location searches deliberately retain the SQL modified-time index rather than
+sorting the entire cached scope. Their small timing shift, disk-mode variation, and
+unscoped repeated-search variation are not improvement claims. The fixture is shallow
+and mostly ASCII with unique filenames; it does not predict real network latency,
+deep directory trees, cold starts, or end-to-end typing/drawing. The temporary
+benchmark was removed. Permanent regressions cover cold and warm scoped parity,
+correlated OR/negation, scope switching and candidate narrowing, sorting/paging,
+local and external updates, cache eviction/cancellation, and optional regex groups.
+
+## Performance regression coverage — November 5, 2026
+
+Run the small committed regression suites with:
+
+```sh
+make test-performance
+```
+
+This runs release-mode XCTest filtered to `PerformanceTests`. All 21 tests also run
+with `make test`; no environment flag is needed. They use isolated temporary databases
+and filesystem trees, never the application's index. Budgets constrain observable work
+and estimated allocated storage, not machine-dependent elapsed time. The focused suites
+took about 1.4 seconds excluding compilation on this Mac.
+
+- [Search regressions](../Tests/EverywhereCoreTests/SearchPerformanceTests.swift)
+  count regex evaluations, directory-membership loads, retained sort arrays, and name
+  bytes. A 1,280-file fixture requires only 128 regex evaluations for its 128-file
+  scope, and 32 for a saved name/size predicate, rather than 1,280 each. Repeated
+  basenames must share regex decisions without sharing row-specific scope/metadata
+  decisions. Other budgets cover correlated OR filters, conservative Unicode handling,
+  cooperative cancellation/recovery, sparse sorting, paging without extra retained
+  storage, and metadata patches without name-buffer growth. File-only changes retain
+  directory membership; directory renames/kind changes and deletion of the omitted
+  empty-name `/` root still invalidate it.
+- [Indexing regressions](../Tests/EverywhereCoreTests/IndexingPerformanceTests.swift)
+  send up to 2,048 synthetic events through real batching/reconciliation. Eight unique
+  file edits require eight point checks and eight row writes, not one check per event.
+  Unchanged replay and repeated wide-directory checks require zero writes, deletions,
+  data-version advances, or cache refreshes. Other cases budget ordinary directory
+  discovery, overlapping recursive events, unrelated-subtree avoidance, and bounded
+  pending-overflow recovery across two roots. Fixtures contain at most 192 files and
+  do not sleep or start FSEvents streams.
+- [Directory-rank regressions](../Tests/EverywhereCoreTests/PathSortPerformanceTests.swift)
+  compare storage when doubling wide/deep directory counts. Wide storage must grow
+  by at most 2.75 times. Deep storage currently exceeds that budget, as detailed below.
+
+### Measured search fixes
+
+A disposable release XCTest created 50,000 distinct `report-<directory>-<number>.txt`
+files: 500 directories with 100 files each, every tenth directory below `/Home`,
+the others below `/Volumes/NAS`. File sizes and modification times equal the file
+number. There are 503 nonempty directory entries plus the empty-name `/` root.
+The environment reported macOS 27.2 (26B123), 16 logical processors, and 48 GiB RAM.
+
+A separate initial filename-cache load plus name-sort preparation took 22.00 ms
+before / 23.05 ms after. The table excludes that work and fixture ingestion. Each
+case used one warm-up and five timed runs, reporting the median of monotonic elapsed
+time. Searches include exact counts, sorting, up to 200 returned rows, and absolute
+path materialization. Baseline and final runs used the same fixture and settings.
+
+| Workload | Before | After | Exact matches |
+| --- | ---: | ---: | ---: |
+| Unscoped regex `^report-[0-9]+-[0-9]+\.txt$` | 17.70 ms | 17.71 ms | 50,000 |
+| Same regex, `/Home` scope | 17.98 ms | 3.18 ms | 5,000 |
+| Same regex, saved `report-0- size:>=50B` expression | 18.98 ms | 1.95 ms | 50 |
+| Fresh scoped name candidates, no patch | 0.123 ms | 0.124 ms | 0 |
+| Fresh scoped name candidates after one file metadata patch | 0.288 ms | 0.124 ms | 0 |
+
+Regex now applies the original correlated folder/name/metadata groups before calling
+Foundation's regex engine. Cheap ASCII guaranteed-literal rejection still happens
+before extension/name-filter decoding; non-ASCII names retain conservative matching.
+Regex memoization stores name-only decisions, never a row's scope or metadata rejection.
+Folder membership and the directory-parent graph now survive file-only patches,
+including moves. A directory topology/name/kind change invalidates them.
+
+The fresh-candidate query was `zzzzz-not-found` scoped to `/Home`; before every timed
+run, `qqqqq-different-miss` cleared reusable name candidates. The patched variant
+also updated one existing file's size/modified time before timing. This isolates
+first-search refresh work, not SQL write latency. Other final warm medians were
+0.374 ms for the first scoped name page, 0.311 ms at offset 4,000, 0.340 ms for scoped
+Path sorting, and 12.20 ms for the equivalent disk-mode scoped name query. These
+warm-page figures are context, not improvement claims. Saved `ext:txt` plus a sparse
+`report-report` regex still took 28.82 ms versus 16.17 ms unscoped, despite zero
+matches; this remaining overhead is not claimed fixed.
+
+These are shallow, ASCII-heavy, local synthetic measurements, not UI latency or
+network-filesystem guarantees. No schema, persistent index, or stored full path was
+added. The large profiling XCTest was removed after measuring; it is not part of
+normal CI or the focused target. To repeat the timings, recreate the fixture above
+in a disposable `LocalPerformanceProfileTests` XCTest class and run
+`swift test -c release --filter LocalPerformanceProfileTests`,
+keeping fixture setup and cache preparation outside the timed search loops.
+
+### Open hotspots with executable budgets
+
+Two tests use **strict `XCTExpectFailure`** around only their currently unmet budget.
+Fixture setup, result counts, and page correctness remain ordinary assertions. These
+are documented unresolved issues, not suppressed unexpected failures: once a fix meets
+the budget, XCTest reports an unexpected success until its expected-failure annotation
+is removed.
+
+1. **Deep directory-rank storage is quadratic.** Each node retains its complete
+   ancestor-ID array. Doubling a chain from 128 to 256 directories grows estimated
+   storage 3.69 times, exceeding the 2.75-times near-linear budget. A separate disposable
+   release profile constructed the same number of directories as either siblings or a
+   chain, one warm-up plus five runs per case:
+
+   | Directory count | Wide construction | Deep construction | Wide storage | Deep storage |
+   | --- | ---: | ---: | ---: | ---: |
+   | 256 | 0.67 ms | 0.60 ms | 36,226 B | 418,738 B |
+   | 512 | 1.40 ms | 1.62 ms | 72,578 B | 1,602,482 B |
+   | 1,024 | 2.90 ms | 4.54 ms | 145,306 B | 6,263,754 B |
+   | 2,048 | 6.31 ms | 14.86 ms | 291,738 B | 24,762,314 B |
+
+   These are the index's allocated-array estimates, not process RSS or all temporary
+   allocations. Per-search release limits lifetime, not peak memory. A fix needs a
+   shared ancestry representation that preserves raw-path/Unicode ordering.
+2. **Regex pagination repeats completed matching work.** Four unchanged 64-row pages
+   over 256 distinct eligible filenames perform 1,024 regex evaluations, not the
+   256-evaluation reuse budget. Unlike literal queries, regex searches do not retain
+   completed candidates between pages. The test verifies all pages and unique IDs
+   before recording the expected work-budget failure.
+
+Further profiling candidates, not resolved or given timing guarantees here: cached
+metadata sort orders still merge over the full order during small patches, including
+some changes irrelevant to their comparator; change-journal overflow boundaries and
+ancestor lookup under deep event storms need larger controlled profiles. Cancellation
+budgets limit work between rows, not time spent inside one pathological Foundation
+regex match or Unicode wildcard fallback. Such adversarial timing experiments must
+remain bounded and process-isolated rather than risk hanging normal XCTest.

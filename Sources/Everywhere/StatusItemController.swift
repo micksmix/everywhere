@@ -2,6 +2,7 @@ import AppKit
 
 final class StatusItemController {
     private var statusItem: NSStatusItem?
+    var onToggle: (() -> Void)?
     var onOpen: (() -> Void)?
     var onRebuild: (() -> Void)?
     var onSettings: (() -> Void)?
@@ -19,7 +20,7 @@ final class StatusItemController {
 
     @objc private func statusClicked() {
         guard let event = NSApp.currentEvent, event.type == .rightMouseUp else {
-            onOpen?()
+            onToggle?()
             return
         }
         presentMenu()

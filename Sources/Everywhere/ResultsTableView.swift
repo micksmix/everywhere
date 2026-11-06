@@ -50,7 +50,7 @@ struct ResultsTableView: NSViewRepresentable {
         table.target = context.coordinator
         table.action = #selector(Coordinator.singleClicked(_:))
         table.doubleAction = #selector(Coordinator.doubleClicked(_:))
-        table.onEnter = { [weak viewModel] in viewModel?.openSelection() }
+        context.coordinator.attach(table: table)
         table.previewItems = { [weak viewModel] in
             guard let viewModel else { return [] }
             return viewModel.selectedEntries.filter { viewModel.isAvailable($0) }
@@ -84,6 +84,7 @@ struct ResultsTableView: NSViewRepresentable {
         private var lastAvailabilityRevision: UInt64 = 0
         private var lastHighlightRequest = SearchRequest()
         private var highlights: SearchHighlights
+        private var pendingFirstResultGeneration: UInt64?
 
         private static let iconCache = NSCache<NSString, NSImage>()
 
@@ -97,6 +98,43 @@ struct ResultsTableView: NSViewRepresentable {
         init(viewModel: ContentViewModel) {
             self.viewModel = viewModel
             highlights = SearchHighlights(request: viewModel.displayedRequest)
+        }
+
+        func attach(table: FSTableView) {
+            tableView = table
+            viewModel.focusResults = { [weak self] in self?.focusResults() }
+            table.onCancelPendingSelection = { [weak self] in self?.pendingFirstResultGeneration = nil }
+            table.onEnter = { [weak self] in
+                guard let self, self.pendingFirstResultGeneration == nil,
+                      self.lastResults == self.viewModel.results,
+                      self.lastHighlightRequest == self.viewModel.displayedRequest else { return }
+                self.viewModel.openSelection(requiringSelection: true)
+            }
+        }
+
+        private func focusResults() {
+            guard let table = tableView, let window = table.window else { return }
+            pendingFirstResultGeneration = nil
+            sync(table: table)
+            guard window.makeFirstResponder(table) else { return }
+            viewModel.selection = []
+            table.deselectAll(nil)
+            pendingFirstResultGeneration = viewModel.resultsGeneration
+            selectFirstResultIfReady(in: table)
+        }
+
+        private func selectFirstResultIfReady(in table: FSTableView) {
+            guard let generation = pendingFirstResultGeneration else { return }
+            guard generation == viewModel.resultsGeneration, table.window?.firstResponder === table else {
+                pendingFirstResultGeneration = nil
+                return
+            }
+            guard viewModel.resultsAreCurrent, lastResults == viewModel.results,
+                  lastHighlightRequest == viewModel.displayedRequest else { return }
+            pendingFirstResultGeneration = nil
+            let indexes = viewModel.results.isEmpty ? IndexSet() : IndexSet(integer: 0)
+            table.selectRowIndexes(indexes, byExtendingSelection: false)
+            if !indexes.isEmpty { table.scrollRowToVisible(0) }
         }
 
         func tableView(_ tableView: NSTableView, didAdd rowView: NSTableRowView, forRow row: Int) {
@@ -415,6 +453,12 @@ struct ResultsTableView: NSViewRepresentable {
             if table.selectedRowIndexes != desired {
                 table.selectRowIndexes(desired, byExtendingSelection: false)
             }
+            if pendingFirstResultGeneration != nil {
+                DispatchQueue.main.async { [weak self, weak table] in
+                    guard let self, let table else { return }
+                    self.selectFirstResultIfReady(in: table)
+                }
+            }
         }
     }
 }
@@ -469,6 +513,18 @@ final class FSTableView: NSTableView, QLPreviewPanelDataSource, QLPreviewPanelDe
     }
 
     var onEnter: (() -> Void)?
+    var onCancelPendingSelection: (() -> Void)?
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onCancelPendingSelection?() }
+        return resigned
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onCancelPendingSelection?()
+        super.mouseDown(with: event)
+    }
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 49 && event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty {
@@ -476,9 +532,9 @@ final class FSTableView: NSTableView, QLPreviewPanelDataSource, QLPreviewPanelDe
             return
         }
         if event.keyCode == 36 || event.keyCode == 76 {
-            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.function)
+            let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
             if modifiers.isEmpty {
-                onEnter?()
+                if !event.isARepeat { onEnter?() }
                 return
             }
         }

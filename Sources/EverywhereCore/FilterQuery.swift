@@ -1,7 +1,7 @@
 import Foundation
 
 struct FilterQuery {
-    enum Predicate {
+    enum Predicate: Equatable {
         case extensions(Set<String>)
         case directory(Bool)
         case size(NumericRange)
@@ -10,7 +10,7 @@ struct FilterQuery {
         case locations([String])
     }
 
-    struct Filter {
+    struct Filter: Equatable {
         let predicate: Predicate
         let negated: Bool
 
@@ -32,7 +32,7 @@ struct FilterQuery {
         let filters: [Filter]
     }
 
-    struct NumericRange {
+    struct NumericRange: Equatable {
         var minimum: Double = -.infinity
         var maximum: Double = .infinity
         var includesMinimum = true

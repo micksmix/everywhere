@@ -55,7 +55,7 @@ struct SearchField: NSViewRepresentable {
                 return true
             }
             guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
-            parent.onSubmit()
+            if NSApp.currentEvent?.isARepeat != true { parent.onSubmit() }
             return true
         }
     }

@@ -45,9 +45,11 @@ Everywhere stays in the menu bar when all its windows are closed. While a search
 Settings window is open, it appears in the Dock and **⌘Tab** app switcher, and its
 normal menus appear at the top of the screen when Everywhere is active. Closing the
 last window removes the Dock and app-switcher entries.
-While the app is running, press your global shortcut (default: **⌥Space**) or click its menu-bar icon.
-A double-click also works. Everywhere brings its existing window forward, restores it
-if minimized, or creates a window if one is unavailable.
+While the app is running, click its menu-bar icon to open or restore the search window.
+Click the icon again while the window is visible to minimize it. Clicking when the app
+is hidden, the window is minimized, or the window is closed brings it back.
+The global shortcut (default: **⌥Space**) and right-click menu's **Open Everywhere**
+always bring the window forward rather than minimizing it.
 
 Closing the window keeps the app running. To quit, use **⌘Q** or right-click the
 menu-bar icon and choose **Quit Everywhere**. The shortcut works only while the app is running.
@@ -220,7 +222,10 @@ Unrecognized `name:value` tokens are treated as ordinary search text.
 
 Use the **All** dropdown immediately beside the search field to choose a scope.
 **All** searches every indexed location. A scope limits results without changing
-your typed query, search modifiers, or the index itself.
+your typed query, search modifiers, or the index itself. Switching scopes filters
+the saved index only: it does not scan folders, contact network volumes, or start
+re-indexing. With the filename cache enabled, scoped name searches use the same
+cache as **All**.
 
 1. Open **Settings → Search Scopes** and click **New Scope…**.
 2. Give it a unique name. Optionally add one or more indexed locations using
@@ -256,6 +261,11 @@ Select one or more results and press **Space** or **⌘Y**, or choose **Quick Lo
 from the context menu or Search menu. Press **Space** or **Escape** to close the
 preview. Up/Down in the preview follows the results selection.
 
+Press **Return** in the search field to focus the results and select the first match
+without opening it. Use **↑/↓** to navigate, then press **Return** again to open the
+selected item. If the search is still running, selection waits for its results.
+With no matches, Return does not open anything. **⌘F** returns to the search field.
+
 In the search field, press **↑** to browse older searches and **↓** to return toward
 newer ones. Moving down past the newest entry restores your unfinished draft.
 Up to 50 distinct queries are saved when you press Enter, open/reveal results, or
@@ -269,7 +279,7 @@ individual rows or **Shift-click** for a range.
 
 | Task | Action |
 | --- | --- |
-| Open with the default app | Double-click, press Return, or use **⌘O** |
+| Open with the default app | Double-click, press **Return** in results, or use **⌘O** |
 | Preview without opening the file | **Space** in results, **⌘Y**, or right-click → **Quick Look** |
 | Show Finder’s Info window | **⌘I**, or right-click → **Get Info** |
 | Reveal in Finder | **⌘R**, or right-click → **Show in Finder** |
@@ -284,7 +294,7 @@ immediately. **Use Default** restores Terminal.app. The selected application mus
 opening folder URLs. Launch errors are shown in an alert.
 
 By default, opening asks for confirmation first: double-clicking a result, pressing
-Return, using **⌘O**, or choosing **Open** in the context menu shows a sheet with
+Return in the results list, using **⌘O**, or choosing **Open** in the context menu shows a sheet with
 **Open** and **Cancel** buttons. Check **Don’t Ask Again** to open immediately from now
 on; the same choice is available as **Settings → General → Opening Files → Ask before
 opening files**, where you can turn the confirmation back on.
@@ -570,7 +580,10 @@ or mount the volume. Rebuild if needed.
 | **Escape** (syntax tips) | Dismiss tips without changing the query |
 | **⌘F** | Focus the search field |
 | **⌘K** | Clear the search and focus the field |
-| **⌘O** or **Return** | Open the selected item(s), or the first result |
+| **Return** (search field) | Focus results and select the first match without opening |
+| **Return** (results) | Open the selected item(s) |
+| **⌘O** | Open the selected item(s), or the first result |
+| **↑ / ↓** (results) | Move the result selection |
 | **Space** (results) or **⌘Y** | Quick Look the selected item(s) |
 | **↑ / ↓** (search field) | Browse saved searches and restore your draft |
 | **⌘R** | Show selection in Finder |
@@ -657,9 +670,13 @@ preparation, which resumes after searching settles. Small file
 changes apply incrementally; large changes, external database edits, or busy indexing
 may reload the cache. Full paths are reconstructed only for each requested page.
 Filename queries with metadata filters, such as `type:image vacation`, also use the
-cache when they contain no OR groups or folder/path conditions. Other filtered
-queries, folder scopes, and path searches use SQLite-backed engines. Regular expressions
-that match names only can also use the cache. Folder scopes narrow the indexed tree before filename matching.
+cache, including OR groups and saved folder scopes. Folder membership is computed
+from cached directory parent IDs, with up to three recent memberships retained
+while directory structure is unchanged, including across file-only updates;
+full paths are not built for every candidate. Regular expressions that match names
+only can also use the cache within scopes, applying saved folder, name, and metadata
+restrictions before evaluating the regex. Path matching uses SQLite-backed engines, and empty
+location scopes retain the indexed recent-items ordering.
 
 Turn the option off to release the cache and query SQLite directly. This uses less
 active memory, but filename searches can be slower. The operating system and SQLite

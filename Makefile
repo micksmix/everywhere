@@ -1,7 +1,7 @@
 APP_NAME := Everywhere
 CONFIG ?= release
 PYTHON ?= python3
-VERSION := 1.12.2
+VERSION := 1.13.0
 BUNDLE_ID := app.everywhere.macos
 BIN_DIR := $(shell swift build -c $(CONFIG) --show-bin-path)
 DIST_BIN_DIR = $(shell swift build -c $(CONFIG) --arch arm64 --arch x86_64 --show-bin-path)
@@ -9,7 +9,7 @@ SPARKLE_DIR := .build/artifacts/sparkle/Sparkle
 APP_DIR := .build/$(APP_NAME).app
 DIST_ZIP := .build/$(APP_NAME)-$(VERSION).zip
 
-.PHONY: all build test app bundle dist bump release run install open clean
+.PHONY: all build test test-performance app bundle dist bump release run install open clean
 
 all: test app
 
@@ -18,6 +18,9 @@ build:
 
 test:
 	swift test
+
+test-performance:
+	swift test -c release --filter 'PerformanceTests'
 
 Resources/AppIcon.icns: Scripts/make-icon.swift Resources/AppIcon.svg
 	@mkdir -p Resources

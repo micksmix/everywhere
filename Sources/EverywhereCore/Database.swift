@@ -1190,18 +1190,42 @@ public final class Database: @unchecked Sendable {
                     return false
                 }
             }
-        if useMemory, !usesSQLRecent, !usesRegex, !request.matchPath, query.groups.count == 1, let group = query.groups.first,
-           !group.terms.contains(where: { $0.hasPathSeparator }),
-           !group.filters.contains(where: {
-               switch $0.predicate {
-               case .scope, .locations: return true
-               default: return false
-               }
-           }) {
+        if useMemory, !usesSQLRecent, !request.matchPath,
+           !query.groups.contains(where: { $0.terms.contains(where: { $0.hasPathSeparator }) }) {
             try refreshMemoryIndex()
             guard let memoryRows else { return SearchResult(entries: [], total: 0, elapsedMS: 0) }
-            let selected = try memoryRows.select(request: request, cancellation: searchCancellation, filteredGroup: group,
-                                                 pathIndex: { try self.pathSortIndex() })
+            var loadedScopes: [FolderScope.Key: FolderScope] = [:]
+            let folderFilters = try query.groups.map { group in
+                try group.filters.compactMap { filter -> FolderScope.Filter? in
+                    let paths: [String]
+                    let recursive: Bool
+                    switch filter.predicate {
+                    case .scope(let path, let descendants): paths = [path]; recursive = descendants
+                    case .locations(let locations): paths = locations; recursive = true
+                    default: return nil
+                    }
+                    let key = FolderScope.Key(paths: Array(Set(paths)).sorted(), recursive: recursive, matchCase: request.matchCase)
+                    let scope: FolderScope
+                    if let loaded = loadedScopes[key] { scope = loaded }
+                    else {
+                        scope = try memoryRows.folderScope(for: key, cancellation: searchCancellation) { try self.loadFolderScope(key) }
+                        loadedScopes[key] = scope
+                    }
+                    return FolderScope.Filter(scope: scope, negated: filter.negated)
+                }
+            }
+            let selected: (rows: [(FilenameIndex.Row, String)], total: Int)
+            if usesRegex {
+                let literal = Self.longestGuaranteedLiteralRun(in: request.text).flatMap { candidate in
+                    candidate.count >= 3 && candidate.allSatisfy(\.isASCII) ? candidate : nil
+                }
+                selected = try memoryRows.selectRegex(request: request, cancellation: searchCancellation, filteredGroups: query.groups,
+                                                     folderFilters: folderFilters, literal: literal,
+                                                     pathIndex: { try self.pathSortIndex() }, matchesRegex: regexBox.matches)
+            } else {
+                selected = try memoryRows.select(request: request, cancellation: searchCancellation, filteredGroups: query.groups,
+                                                folderFilters: folderFilters, pathIndex: { try self.pathSortIndex() })
+            }
             let paths = try materializePaths(ids: selected.rows.map { $0.0.id })
             let entries = selected.rows.map { row, name in
                 Entry(id: row.id, path: paths[row.id] ?? name, name: name, isDirectory: row.isDirectory,
@@ -1328,6 +1352,17 @@ public final class Database: @unchecked Sendable {
         if range.maximum.isFinite { conditions.append("\(column) \(range.includesMaximum ? "<=" : "<") \(range.maximum)") }
         let condition = conditions.isEmpty ? "1" : conditions.joined(separator: " AND ")
         return range.inverted ? "NOT (\(condition))" : condition
+    }
+
+    private func loadFolderScope(_ key: FolderScope.Key) throws -> FolderScope {
+        var parents = Set<Int64>()
+        var included = Set<Int64>()
+        for path in key.paths {
+            let roots = try scopeRoots(path: path, recursive: key.recursive, matchCase: key.matchCase)
+            parents.formUnion(roots.folders)
+            included.formUnion(roots.included)
+        }
+        return FolderScope(parents: parents, included: included)
     }
 
     private func scopeRoots(path: String, recursive: Bool, matchCase: Bool) throws -> (folders: [Int64], included: [Int64]) {
@@ -1630,6 +1665,7 @@ public final class Database: @unchecked Sendable {
         var runs: [(text: String, safe: Bool)] = []
         var current = ""
         var index = 0
+        var groupRunStarts: [Int] = []
         var sawAlternation = false
         var sawGroupConstruct = false
 
@@ -1670,6 +1706,7 @@ public final class Database: @unchecked Sendable {
                     sawGroupConstruct = true
                 }
                 endRun()
+                groupRunStarts.append(runs.count)
                 index += 1
                 continue
             }
@@ -1694,13 +1731,11 @@ public final class Database: @unchecked Sendable {
                 continue
             }
             if specials.contains(character) {
-                var safe = true
-                if character == ")",
-                   index + 1 < characters.count,
-                   quantifierCharacters.contains(characters[index + 1]) {
-                    safe = false
+                let quantifiedGroup = character == ")" && index + 1 < characters.count && quantifierCharacters.contains(characters[index + 1])
+                endRun(safe: !quantifiedGroup)
+                if character == ")", let start = groupRunStarts.popLast(), quantifiedGroup {
+                    for run in start..<runs.count { runs[run].safe = false }
                 }
-                endRun(safe: safe)
                 index += 1
                 continue
             }

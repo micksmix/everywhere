@@ -24,8 +24,13 @@ final class FilenameIndex {
     private var sortOrders: [Ordering: [UInt32]] = [:]
     private var recentOrders: [Ordering] = []
     private var previousRequest: SearchRequest?
+    private var previousQuery: ParsedQuery?
+    private var previousFilters: [[FilterQuery.Filter]]?
     private var previousTerms: [String]?
     private var previousMatches: [UInt32] = []
+    private var folderScopes: [FolderScope.Key: FolderScope] = [:]
+    private var recentScopes: [FolderScope.Key] = []
+    private var directoryParents: [Int64: Int64]?
     private var repeatedNames = false
     private var deadRows = 0
     private var unusedNameBytes = 0
@@ -35,8 +40,10 @@ final class FilenameIndex {
     }
 
     var statistics: SearchCacheStatistics {
-        SearchCacheStatistics(itemCount: rows.count - deadRows,
-                              storageBytes: rows.capacity * MemoryLayout<Row>.stride + names.capacity + (idOrder.capacity + previousMatches.capacity) * MemoryLayout<UInt32>.stride,
+        let scopeBytes = (directoryParents?.capacity ?? 0) * MemoryLayout<Int64>.stride * 2
+            + folderScopes.reduce(0) { $0 + $1.value.storageBytes + $1.key.paths.reduce(0) { $0 + $1.utf8.count } }
+        return SearchCacheStatistics(itemCount: rows.count - deadRows,
+                              storageBytes: rows.capacity * MemoryLayout<Row>.stride + names.capacity + (idOrder.capacity + previousMatches.capacity) * MemoryLayout<UInt32>.stride + scopeBytes,
                               sortBytes: sortOrders.values.reduce(0) { $0 + $1.capacity * MemoryLayout<UInt32>.stride },
                               sortCount: sortOrders.count)
     }
@@ -114,16 +121,70 @@ final class FilenameIndex {
         sortOrders[ordering] = sorted
     }
 
-    func select(request: SearchRequest, cancellation: SearchCancellation?, filteredGroup: FilterQuery.Group? = nil,
-                parsedQuery: ParsedQuery? = nil,
+    func folderScope(for key: FolderScope.Key, cancellation: SearchCancellation?, load: () throws -> FolderScope) throws -> FolderScope {
+        if let cached = folderScopes[key] {
+            recentScopes.removeAll { $0 == key }
+            recentScopes.append(key)
+            return cached
+        }
+        let roots = try load()
+        let scope = key.recursive ? try recursiveScope(roots, cancellation: cancellation) : roots
+        try cancellation?.check()
+        if recentScopes.count == 3, let oldest = recentScopes.first {
+            folderScopes[oldest] = nil
+            recentScopes.removeFirst()
+        }
+        folderScopes[key] = scope
+        recentScopes.append(key)
+        return scope
+    }
+
+    private func recursiveScope(_ roots: FolderScope, cancellation: SearchCancellation?) throws -> FolderScope {
+        guard !roots.parents.isEmpty || !roots.included.isEmpty else { return roots }
+        if directoryParents == nil {
+            var parents: [Int64: Int64] = [:]
+            for (offset, index) in idOrder.enumerated() {
+                if offset % 1024 == 0 { try cancellation?.check() }
+                let row = rows[index]
+                if row.isDirectory { parents[row.id] = row.parent }
+            }
+            try cancellation?.check()
+            directoryParents = parents
+        }
+        guard let directoryParents else { return roots }
+        var parents = roots.parents.union(roots.included)
+        var excluded = Set<Int64>()
+        for (offset, id) in directoryParents.keys.enumerated() {
+            if offset % 256 == 0 { try cancellation?.check() }
+            if parents.contains(id) || excluded.contains(id) { continue }
+            var trail = Set<Int64>()
+            var current = id
+            while !parents.contains(current), !excluded.contains(current), let parent = directoryParents[current] {
+                if trail.count % 256 == 0 { try cancellation?.check() }
+                guard trail.insert(current).inserted else { break }
+                current = parent
+            }
+            if parents.contains(current) { parents.formUnion(trail) }
+            else { excluded.formUnion(trail) }
+        }
+        return FolderScope(parents: parents, included: roots.included)
+    }
+
+    func select(request: SearchRequest, cancellation: SearchCancellation?, filteredGroups: [FilterQuery.Group]? = nil,
+                folderFilters: [[FolderScope.Filter]] = [], parsedQuery: ParsedQuery? = nil,
                 pathIndex: () throws -> PathSortIndex) throws -> (rows: [(Row, String)], total: Int) {
-        let query = NameQuery(request, parsed: filteredGroup.map { ParsedQuery(groups: [ParsedGroup(terms: $0.terms)]) } ?? parsedQuery)
+        let parsed = filteredGroups.map { ParsedQuery(groups: $0.map { ParsedGroup(terms: $0.terms) }) } ?? parsedQuery ?? SearchQueryParser.parse(request.text)
+        let nameGroups = parsed.groups.reduce(into: [ParsedGroup]()) { groups, group in
+            if !groups.contains(group) { groups.append(group) }
+        }
+        let query = NameQuery(request, parsed: ParsedQuery(groups: nameGroups))
+        let filters = filteredGroups?.map(\.filters)
         var reuse = false
         var identical = false
-        if filteredGroup == nil, let previous = previousRequest,
+        if let previous = previousRequest, previousFilters == filters, previous.scope == request.scope,
            previous.kind == request.kind, previous.includeHidden == request.includeHidden,
            previous.matchCase == request.matchCase, previous.wholeWord == request.wholeWord {
-            identical = previous.text == request.text
+            identical = previousQuery == parsed
             if identical {
                 reuse = true
             } else if let old = previousTerms, let new = query.literalTerms {
@@ -155,32 +216,28 @@ final class FilenameIndex {
                 }
             }
         }
-        if let group = filteredGroup {
-            var filtered: [UInt32] = []
-            for (offset, index) in matches.enumerated() {
-                if offset % 256 == 0 { try cancellation?.check() }
-                let row = rows[index]
-                let name = name(for: row)
-                if group.filters.allSatisfy({ $0.matches(name: name, isDirectory: row.isDirectory, size: row.size, modified: row.modified) }) {
-                    filtered.append(index)
-                }
-            }
-            matches = filtered
+        if !identical, let filteredGroups {
+            matches = try applyingFilters(matches, groups: filteredGroups, folderFilters: folderFilters, request: request,
+                                          namesAlreadyMatched: true, cancellation: cancellation)
         }
         let ordering = Ordering(key: request.sortKey, ascending: request.ascending)
         let alreadySorted = reuse && previousRequest?.sortKey == request.sortKey && previousRequest?.ascending == request.ascending
         matches = try applyingOrder(matches, ordering: ordering, alreadySorted: alreadySorted, cancellation: cancellation, pathIndex: pathIndex)
         try cancellation?.check()
-        previousRequest = filteredGroup == nil ? request : nil
-        previousTerms = filteredGroup == nil ? query.literalTerms : nil
+        previousRequest = request
+        previousQuery = parsed
+        previousFilters = filters
+        previousTerms = query.literalTerms
         previousMatches = matches
         let page = matches.dropFirst(max(0, request.offset)).prefix(max(1, min(request.limit, 100_000)))
         return (page.map { (rows[$0], name(for: rows[$0])) }, matches.count)
     }
 
-    func selectRegex(request: SearchRequest, cancellation: SearchCancellation?,
+    func selectRegex(request: SearchRequest, cancellation: SearchCancellation?, filteredGroups: [FilterQuery.Group]? = nil,
+                     folderFilters: [[FolderScope.Filter]] = [],
                      literal: String?, pathIndex: () throws -> PathSortIndex, matchesRegex: (String) -> Bool) throws -> (rows: [(Row, String)], total: Int) {
         let prefilter = literal.map { NameQuery(literal: $0, matchCase: request.matchCase) }
+        let filters = filteredGroups.map { RowFilterMatcher(groups: $0, folderFilters: folderFilters, request: request, namesAlreadyMatched: false) }
         var matches: [UInt32] = []
         var nameMatches: [Int: Bool] = [:]
         try names.withUnsafeBufferPointer { bytes in
@@ -191,13 +248,16 @@ final class FilenameIndex {
                       request.kind != .files || !row.isDirectory,
                       request.kind != .folders || row.isDirectory else { continue }
                 if row.isASCII, let prefilter, !prefilter.mayMatch(mask: row.mask) { continue }
-                if repeatedNames, let matched = nameMatches[row.nameOffset] {
-                    if matched { matches.append(index) }
+                let cachedMatch = repeatedNames ? nameMatches[row.nameOffset] : nil
+                if cachedMatch == false { continue }
+                let nameBytes = UnsafeBufferPointer(start: bytes.baseAddress!.advanced(by: row.nameOffset), count: Int(row.nameLength))
+                if cachedMatch == nil, row.isASCII, let prefilter, !prefilter.matches(bytes: nameBytes, isASCII: true) {
+                    if repeatedNames { nameMatches[row.nameOffset] = false }
                     continue
                 }
-                let nameBytes = UnsafeBufferPointer(start: bytes.baseAddress!.advanced(by: row.nameOffset), count: Int(row.nameLength))
-                if row.isASCII, let prefilter, !prefilter.matches(bytes: nameBytes, isASCII: true) {
-                    if repeatedNames { nameMatches[row.nameOffset] = false }
+                if let filters, !filters.matches(row, bytes: bytes) { continue }
+                if cachedMatch == true {
+                    matches.append(index)
                     continue
                 }
                 let matched = matchesRegex(String(decoding: nameBytes, as: UTF8.self))
@@ -210,6 +270,54 @@ final class FilenameIndex {
         try cancellation?.check()
         let page = ordered.dropFirst(max(0, request.offset)).prefix(max(1, min(request.limit, 100_000)))
         return (page.map { (rows[$0], name(for: rows[$0])) }, ordered.count)
+    }
+
+    private struct RowFilterMatcher {
+        let groups: [FilterQuery.Group]
+        let folderFilters: [[FolderScope.Filter]]
+        let queries: [NameQuery]
+        let needsName: [Bool]
+        let namesMatchEveryGroup: Bool
+
+        init(groups: [FilterQuery.Group], folderFilters: [[FolderScope.Filter]], request: SearchRequest, namesAlreadyMatched: Bool) {
+            self.groups = groups
+            self.folderFilters = folderFilters
+            queries = groups.map { NameQuery(request, parsed: ParsedQuery(groups: [ParsedGroup(terms: $0.terms)])) }
+            needsName = groups.map { $0.filters.contains { if case .extensions = $0.predicate { return true }; return false } }
+            namesMatchEveryGroup = namesAlreadyMatched && groups.allSatisfy { $0.terms == groups.first?.terms }
+        }
+
+        func matches(_ row: Row, bytes: UnsafeBufferPointer<UInt8>) -> Bool {
+            var name: String?
+            for (groupIndex, group) in groups.enumerated() {
+                guard folderFilters.isEmpty || folderFilters[groupIndex].allSatisfy({ $0.matches(id: row.id, parent: row.parent) }) else { continue }
+                if needsName[groupIndex], name == nil {
+                    name = String(decoding: bytes[row.nameOffset..<(row.nameOffset + Int(row.nameLength))], as: UTF8.self)
+                }
+                guard group.filters.allSatisfy({ $0.matches(name: name ?? "", isDirectory: row.isDirectory, size: row.size, modified: row.modified) }) else { continue }
+                if !group.terms.isEmpty && !namesMatchEveryGroup {
+                    let query = queries[groupIndex]
+                    if row.isASCII && !query.mayMatch(mask: row.mask) { continue }
+                    let nameBytes = UnsafeBufferPointer(start: bytes.baseAddress!.advanced(by: row.nameOffset), count: Int(row.nameLength))
+                    guard query.matches(bytes: nameBytes, isASCII: row.isASCII) else { continue }
+                }
+                return true
+            }
+            return false
+        }
+    }
+
+    private func applyingFilters(_ matches: [UInt32], groups: [FilterQuery.Group], folderFilters: [[FolderScope.Filter]],
+                                 request: SearchRequest, namesAlreadyMatched: Bool, cancellation: SearchCancellation?) throws -> [UInt32] {
+        let matcher = RowFilterMatcher(groups: groups, folderFilters: folderFilters, request: request, namesAlreadyMatched: namesAlreadyMatched)
+        var filtered: [UInt32] = []
+        try names.withUnsafeBufferPointer { bytes in
+            for (offset, index) in matches.enumerated() {
+                if offset % 256 == 0 { try cancellation?.check() }
+                if matcher.matches(rows[index], bytes: bytes) { filtered.append(index) }
+            }
+        }
+        return filtered
     }
 
     private func applyingOrder(_ matches: [UInt32], ordering: Ordering, alreadySorted: Bool, cancellation: SearchCancellation?,
@@ -245,6 +353,8 @@ final class FilenameIndex {
                pathIndex: () throws -> PathSortIndex) throws {
         guard !changedIDs.isEmpty else { return }
         previousRequest = nil
+        previousQuery = nil
+        previousFilters = nil
         previousTerms = nil
         previousMatches = []
         let positions = Dictionary(uniqueKeysWithValues: changedIDs.compactMap { id in position(for: id).map { (id, $0) } })
@@ -267,11 +377,15 @@ final class FilenameIndex {
             idsChanged = idsChanged || addedOrRemoved
             namesChanged = namesChanged || addedOrRemoved || !sameName
             pathsChanged = pathsChanged || addedOrRemoved || !sameName || !sameParent
+            if old == nil && replacement == nil { directoriesChanged = true }
             if old?.isDirectory == true || replacement?.isDir == true {
                 directoriesChanged = directoriesChanged || addedOrRemoved || !sameName || !sameParent || old?.isDirectory != replacement?.isDir
             }
         }
         if directoriesChanged {
+            folderScopes.removeAll()
+            recentScopes.removeAll()
+            directoryParents = nil
             for ordering in recentOrders where ordering.key == .path { sortOrders[ordering] = nil }
             recentOrders.removeAll { $0.key == .path }
         }

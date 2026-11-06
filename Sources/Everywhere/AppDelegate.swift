@@ -20,6 +20,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKeyManager.onActivate = { [weak self] in
             self?.showMainWindow()
         }
+        statusController.onToggle = { [weak self] in
+            self?.toggleMainWindow()
+        }
         statusController.onOpen = { [weak self] in
             self?.showMainWindow()
         }
@@ -147,6 +150,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         accessory.layoutAttribute = .left
         accessory.view = TitleBarIdentityView(title: "Everywhere")
         window.addTitlebarAccessoryViewController(accessory)
+    }
+
+    private func toggleMainWindow() {
+        if let window = mainWindow, NSApp.windows.contains(window),
+           !closingWindows.contains(window), !NSApp.isHidden,
+           window.isVisible, !window.isMiniaturized {
+            window.miniaturize(nil)
+        } else {
+            showMainWindow()
+        }
     }
 
     func showMainWindow() {

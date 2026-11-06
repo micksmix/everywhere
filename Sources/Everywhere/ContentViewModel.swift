@@ -22,10 +22,13 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     }
     @Published private(set) var displayedRequest = SearchRequest()
     var previewSelection: (() -> Void)?
+    var focusResults: (() -> Void)?
     private var history = SearchHistory()
     private var navigatingHistory = false
 
     @Published private(set) var results: [Entry] = []
+    @Published private(set) var resultsAreCurrent = false
+    private(set) var resultsGeneration: UInt64 = 0
     @Published var selection: Set<Int64> = []
     @Published private(set) var totalMatches = 0
     @Published private(set) var cacheStatistics = SearchCacheStatistics()
@@ -277,6 +280,10 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
     }
 
     private func scheduleSearch(offset: Int = 0) {
+        if offset == 0 {
+            resultsGeneration &+= 1
+            resultsAreCurrent = false
+        }
         let useMemory = AppPreferences.shared.keepSearchIndexInMemory
         cancelMemoryPreparation()
         searchInFlight = true
@@ -312,6 +319,7 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
                     self.displayedRequest = request
                     self.apply(result, append: offset > 0)
                     self.loadedGeneration = generation
+                    self.resultsAreCurrent = true
                     self.elapsedMS = (CFAbsoluteTimeGetCurrent() - started) * 1000
                     self.finishSearch()
                 }
@@ -319,6 +327,8 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
                 guard !Task.isCancelled else { return }
                 DispatchQueue.main.async {
                     guard let self, generation == self.searchGeneration else { return }
+                    self.resultsAreCurrent = false
+                    self.selection = []
                     self.results = []
                     self.totalMatches = 0
                     self.searchError = Self.errorText(error)
@@ -353,7 +363,8 @@ final class ContentViewModel: ObservableObject, @unchecked Sendable {
         return results.first.map { [$0] } ?? []
     }
 
-    func openSelection() {
+    func openSelection(requiringSelection: Bool = false) {
+        guard resultsAreCurrent, !requiringSelection || !selection.isEmpty else { return }
         rememberSearch()
         confirmAndOpen(selectedEntries)
     }
