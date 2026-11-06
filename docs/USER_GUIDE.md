@@ -46,8 +46,10 @@ Settings window is open, it appears in the Dock and **⌘Tab** app switcher, and
 normal menus appear at the top of the screen when Everywhere is active. Closing the
 last window removes the Dock and app-switcher entries.
 While the app is running, click its menu-bar icon to open or restore the search window.
-Click the icon again while the window is visible to minimize it. Clicking when the app
-is hidden, the window is minimized, or the window is closed brings it back.
+Click the icon again while the window is visible to minimize back to the menu bar:
+the search window closes, the app hides, and no minimized window is added to the Dock.
+Everywhere keeps running and updating the index. Clicking when the app is hidden,
+the window is minimized, or the window is closed brings it back.
 The global shortcut (default: **⌥Space**) and right-click menu's **Open Everywhere**
 always bring the window forward rather than minimizing it.
 
@@ -285,7 +287,8 @@ individual rows or **Shift-click** for a range.
 | Reveal in Finder | **⌘R**, or right-click → **Show in Finder** |
 | Choose another app | Right-click a single result → **Open With** |
 | Open a directory in Terminal | **⌥⌘T**, or right-click → **Open in Terminal** |
-| Copy the full path | Right-click → **Copy Path** |
+| Copy files for pasting into Finder | **⌘C** with results focused, or right-click → **Copy File** / **Copy Files** |
+| Copy the full path | **⇧⌘C** with results focused, or right-click → **Copy Path** |
 | Copy just the filename | Right-click → **Copy Name** |
 
 Open in Terminal uses Terminal.app by default. In **Settings → Terminal**,
@@ -299,8 +302,10 @@ Return in the results list, using **⌘O**, or choosing **Open** in the context 
 on; the same choice is available as **Settings → General → Opening Files → Ask before
 opening files**, where you can turn the confirmation back on.
 
-For a file, Open in Terminal uses its containing directory. Copied names or paths from
-multiple selections are separated by newlines. Open actions handle up to ten items at
+File copying writes separate native file URLs, including for multiple selections; it
+requires an explicit selection and available locations. **⌘C** while editing the search
+field still copies selected text. Copied names or paths from multiple selections are
+separated by newlines. For a file, Open in Terminal uses its containing directory. Open actions handle up to ten items at
 once; Open in Terminal handles up to five. With no explicit selection, keyboard open
 and reveal actions use the first result. **Get Info** opens Finder’s own information
 windows for up to ten selected files or folders, or the first result if nothing is
@@ -371,8 +376,9 @@ when unavailable** option, enabled by default. A retained index stays searchable
 when a disk is unplugged or a share is offline, including through saved scopes.
 
 Offline rows are marked **(Offline)** and show their last indexed name, size, date,
-and path. **Copy Name** and **Copy Path** still work. Opening, revealing, Get Info,
-Terminal, Open With, and previews wait until the location is available again, avoiding
+and path. **Copy Name** and **Copy Path** still work, including **⇧⌘C** in results.
+Copy Files, opening, revealing, Get Info, Terminal, Open With, and previews wait until
+the location is available again, avoiding
 filesystem calls that could block on a disconnected share.
 
 Availability is checked about every five seconds while the service is running, even
@@ -589,6 +595,8 @@ or mount the volume. Rebuild if needed.
 | **⌘R** | Show selection in Finder |
 | **⌘I** | Get Info in Finder for the selected item(s), or the first result |
 | **⌥⌘T** | Open selection's directory in Terminal |
+| **⌘C** (results) | Copy selected files for Finder Paste; in the search field, copy selected text |
+| **⇧⌘C** (results) | Copy selected paths, separated by newlines |
 | **⌥⌘C** | Toggle Match Case |
 | **⌥⌘W** | Toggle Match Whole Words |
 | **⌥⌘P** | Toggle Match Path |

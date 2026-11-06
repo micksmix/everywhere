@@ -110,6 +110,40 @@ struct ResultsTableView: NSViewRepresentable {
                       self.lastHighlightRequest == self.viewModel.displayedRequest else { return }
                 self.viewModel.openSelection(requiringSelection: true)
             }
+            table.onCopyFiles = { [weak self] in
+                guard let self else { return }
+                self.copyFiles(self.clipboardEntries())
+            }
+            table.onCopyPaths = { [weak self] in
+                guard let self else { return }
+                self.viewModel.copyPath(self.clipboardEntries())
+            }
+            table.canCopyFiles = { [weak self] in
+                guard let self else { return false }
+                let entries = self.clipboardEntries()
+                return !entries.isEmpty && entries.allSatisfy { self.viewModel.isAvailable($0) }
+            }
+            table.canCopyPaths = { [weak self] in
+                !(self?.clipboardEntries().isEmpty ?? true)
+            }
+        }
+
+        private func clipboardEntries(includingClickedRow: Bool = false) -> [Entry] {
+            guard let table = tableView, pendingFirstResultGeneration == nil,
+                  viewModel.resultsAreCurrent, lastResults == viewModel.results,
+                  lastHighlightRequest == viewModel.displayedRequest else { return [] }
+            if includingClickedRow, lastResults.indices.contains(table.clickedRow),
+               !table.selectedRowIndexes.contains(table.clickedRow) {
+                return [lastResults[table.clickedRow]]
+            }
+            return table.selectedRowIndexes.compactMap { row in
+                lastResults.indices.contains(row) ? lastResults[row] : nil
+            }
+        }
+
+        private func copyFiles(_ entries: [Entry]) {
+            guard !entries.isEmpty, viewModel.requireAvailable(entries) else { return }
+            FileClipboard.copyFiles(entries.map(\.path))
         }
 
         private func focusResults() {
@@ -319,11 +353,17 @@ struct ResultsTableView: NSViewRepresentable {
 
             menu.addItem(.separator())
 
+            let copyFiles = NSMenuItem(title: "Copy Files", action: #selector(copyFilesFromMenu(_:)), keyEquivalent: "c")
+            copyFiles.keyEquivalentModifierMask = .command
+            copyFiles.target = self
+            menu.addItem(copyFiles)
+
             let copyName = NSMenuItem(title: "Copy Name", action: #selector(copyNameFromMenu(_:)), keyEquivalent: "")
             copyName.target = self
             menu.addItem(copyName)
 
-            let copyPath = NSMenuItem(title: "Copy Path", action: #selector(copyPathFromMenu(_:)), keyEquivalent: "")
+            let copyPath = NSMenuItem(title: "Copy Path", action: #selector(copyPathFromMenu(_:)), keyEquivalent: "c")
+            copyPath.keyEquivalentModifierMask = [.command, .shift]
             copyPath.target = self
             menu.addItem(copyPath)
 
@@ -334,8 +374,14 @@ struct ResultsTableView: NSViewRepresentable {
             let entries = targetEntries()
             let available = entries.allSatisfy { viewModel.isAvailable($0) }
             for item in menu.items {
-                let copiesMetadata = item.action == #selector(copyNameFromMenu(_:)) || item.action == #selector(copyPathFromMenu(_:))
-                item.isEnabled = !entries.isEmpty && (available || copiesMetadata)
+                if item.action == #selector(copyFilesFromMenu(_:)) {
+                    let targets = clipboardEntries(includingClickedRow: true)
+                    item.title = targets.count == 1 ? "Copy File" : "Copy Files"
+                    item.isEnabled = !targets.isEmpty && targets.allSatisfy { viewModel.isAvailable($0) }
+                } else {
+                    let copiesMetadata = item.action == #selector(copyNameFromMenu(_:)) || item.action == #selector(copyPathFromMenu(_:))
+                    item.isEnabled = !entries.isEmpty && (available || copiesMetadata)
+                }
             }
             if let openWithItem = menu.item(withTitle: "Open With"), let submenu = openWithItem.submenu {
                 rebuildOpenWithMenu(submenu, for: available ? entries.first : nil)
@@ -411,6 +457,10 @@ struct ResultsTableView: NSViewRepresentable {
                 let url = URL(fileURLWithPath: entry.path)
                 NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: configuration)
             }
+        }
+
+        @objc private func copyFilesFromMenu(_ sender: Any?) {
+            copyFiles(clipboardEntries(includingClickedRow: true))
         }
 
         @objc private func copyNameFromMenu(_ sender: Any?) {
@@ -514,6 +564,35 @@ final class FSTableView: NSTableView, QLPreviewPanelDataSource, QLPreviewPanelDe
 
     var onEnter: (() -> Void)?
     var onCancelPendingSelection: (() -> Void)?
+    var onCopyFiles: (() -> Void)?
+    var onCopyPaths: (() -> Void)?
+    var canCopyFiles: (() -> Bool)?
+    var canCopyPaths: (() -> Bool)?
+
+    @objc func copy(_ sender: Any?) {
+        onCopyFiles?()
+    }
+
+    @objc func copyPaths(_ sender: Any?) {
+        onCopyPaths?()
+    }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(copy(_:)) { return canCopyFiles?() == true }
+        if item.action == #selector(copyPaths(_:)) { return canCopyPaths?() == true }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if window?.firstResponder === self, event.charactersIgnoringModifiers?.lowercased() == "c" {
+            let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            if modifiers == [.command, .shift] {
+                copyPaths(nil)
+                return true
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()

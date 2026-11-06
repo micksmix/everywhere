@@ -213,7 +213,7 @@ final class SearchPerformanceTests: XCTestCase {
         }
     }
 
-    func testRegexPagingHasKnownRepeatedEvaluationWork() throws {
+    func testRegexPagingAndResortingReuseCompletedCandidates() throws {
         try populate(directories: 4)
         try withIndex { index in
             var evaluations = 0
@@ -230,9 +230,77 @@ final class SearchPerformanceTests: XCTestCase {
                 ids.formUnion(result.rows.map { $0.0.id })
             }
             XCTAssertEqual(ids.count, 256)
-            XCTExpectFailure("Unchanged regex pages still rescan all eligible names instead of reusing completed candidates.") {
-                XCTAssertEqual(evaluations, 256)
+            for key in [SortKey.name, .size, .kind, .modified] {
+                for ascending in [false, true] {
+                    let request = SearchRequest(text: ".*", kind: .files, useRegex: true, sortKey: key, ascending: ascending, limit: 11, offset: 3)
+                    let result = try index.selectRegex(request: request, cancellation: nil, literal: nil, pathIndex: unexpectedPathIndex) { _ in
+                        evaluations += 1
+                        return true
+                    }
+                    XCTAssertEqual(result.total, 256)
+                    XCTAssertEqual(result.rows.count, 11)
+                }
             }
+            XCTAssertEqual(evaluations, 256)
+        }
+    }
+
+    func testEmptyRegexCandidatesAreReusedAndNotMixedWithLiteralCandidates() throws {
+        try populate(directories: 4)
+        try withIndex { index in
+            var evaluations = 0
+            var request = SearchRequest(text: "report", kind: .files, useRegex: true, limit: 17)
+            for offset in [0, 17, 34] {
+                request.offset = offset
+                let result = try index.selectRegex(request: request, cancellation: nil, literal: nil, pathIndex: unexpectedPathIndex) { _ in
+                    evaluations += 1
+                    return false
+                }
+                XCTAssertEqual(result.total, 0)
+                XCTAssertTrue(result.rows.isEmpty)
+            }
+            XCTAssertEqual(evaluations, 256)
+            request.useRegex = false
+            let literal = try index.select(request: request, cancellation: nil, pathIndex: unexpectedPathIndex)
+            XCTAssertEqual(literal.total, 256)
+            request.useRegex = true
+            let regex = try index.selectRegex(request: request, cancellation: nil, literal: nil, pathIndex: unexpectedPathIndex) { _ in
+                evaluations += 1
+                return false
+            }
+            XCTAssertEqual(regex.total, 0)
+            XCTAssertEqual(evaluations, 512)
+        }
+    }
+
+    func testCancelledRegexQueryDoesNotPublishPartialCandidates() throws {
+        try populate(directories: 4)
+        try withIndex { index in
+            let previous = SearchRequest(text: "^report", kind: .files, useRegex: true, limit: 17)
+            let initial = try index.selectRegex(request: previous, cancellation: nil, literal: nil, pathIndex: unexpectedPathIndex) { _ in true }
+            let changed = SearchRequest(text: ".*", kind: .files, useRegex: true, limit: 17)
+            let cancellation = SearchCancellation()
+            var evaluations = 0
+            XCTAssertThrowsError(try index.selectRegex(request: changed, cancellation: cancellation, literal: nil, pathIndex: unexpectedPathIndex) { _ in
+                evaluations += 1
+                if evaluations == 32 { cancellation.cancel() }
+                return true
+            }) { XCTAssertTrue($0 is CancellationError) }
+            var previousEvaluations = 0
+            let reused = try index.selectRegex(request: previous, cancellation: nil, literal: nil, pathIndex: unexpectedPathIndex) { _ in
+                previousEvaluations += 1
+                return false
+            }
+            XCTAssertEqual(reused.total, initial.total)
+            XCTAssertEqual(reused.rows.map { $0.0.id }, initial.rows.map { $0.0.id })
+            XCTAssertEqual(previousEvaluations, 0)
+            var recoveredEvaluations = 0
+            let recovered = try index.selectRegex(request: changed, cancellation: nil, literal: nil, pathIndex: unexpectedPathIndex) { _ in
+                recoveredEvaluations += 1
+                return true
+            }
+            XCTAssertEqual(recovered.total, 256)
+            XCTAssertEqual(recoveredEvaluations, 256)
         }
     }
 

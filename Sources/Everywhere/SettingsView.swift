@@ -297,7 +297,7 @@ struct SettingsView: View {
         } footer: {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Record a combination with Control, Option, or Command, including punctuation, arrow, and other special keys. Function keys can be used without modifiers; you may need to hold Fn to type them. Changes are saved immediately. Clear removes the shortcut; Reset restores ⌥ Space.")
-                Text("The global shortcut is suspended while recording. Some shortcuts are reserved by macOS or other apps and cannot be detected in advance. The menu bar icon always opens the search window.")
+                Text("The global shortcut is suspended while recording. Some shortcuts are reserved by macOS or other apps and cannot be detected in advance. The menu bar icon opens the search window or minimizes it back to the menu bar, not the Dock.")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .multilineTextAlignment(.leading)

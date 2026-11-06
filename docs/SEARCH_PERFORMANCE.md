@@ -268,7 +268,7 @@ cache. Disk searches conservatively prefilter positive ASCII literal terms in SQ
 non-ASCII names bypass that prefilter to preserve Unicode matching.
 
 These measurements include exact counts, result sorting, and returned path construction,
-but exclude UI work. They do not measure the user's real index or Cardinal. Broad filters,
+but exclude UI work. They do not measure the user's real index. Broad filters,
 cache loading, OR groups, and folder/path conditions have different performance.
 The harness and its generated indexes were temporary, outside the repository.
 
@@ -571,11 +571,10 @@ keeping fixture setup and cache preparation outside the timed search loops.
 
 ### Open hotspots with executable budgets
 
-Two tests use **strict `XCTExpectFailure`** around only their currently unmet budget.
-Fixture setup, result counts, and page correctness remain ordinary assertions. These
-are documented unresolved issues, not suppressed unexpected failures: once a fix meets
-the budget, XCTest reports an unexpected success until its expected-failure annotation
-is removed.
+The deep-directory test uses **strict `XCTExpectFailure`** around only its currently
+unmet storage budget. Fixture setup and correctness remain ordinary assertions. Once a
+fix meets the budget, XCTest reports an unexpected success until the annotation is
+removed. The former regex-pagination expected failure is now a passing regression test.
 
 1. **Deep directory-rank storage is quadratic.** Each node retains its complete
    ancestor-ID array. Doubling a chain from 128 to 256 directories grows estimated
@@ -593,11 +592,11 @@ is removed.
    These are the index's allocated-array estimates, not process RSS or all temporary
    allocations. Per-search release limits lifetime, not peak memory. A fix needs a
    shared ancestry representation that preserves raw-path/Unicode ordering.
-2. **Regex pagination repeats completed matching work.** Four unchanged 64-row pages
-   over 256 distinct eligible filenames perform 1,024 regex evaluations, not the
-   256-evaluation reuse budget. Unlike literal queries, regex searches do not retain
-   completed candidates between pages. The test verifies all pages and unique IDs
-   before recording the expected work-budget failure.
+2. **Resolved: repeated regex matching across pages and sorts.** Four unchanged 64-row
+   pages over 256 distinct eligible filenames, plus repeated sort changes, now perform
+   exactly 256 regex evaluations in total. Completed regex candidates share the existing
+   single-query cache; empty matches are reusable too. Changed filters, queries, or index
+   contents invalidate reuse, and cancellation cannot publish partial candidates.
 
 Further profiling candidates, not resolved or given timing guarantees here: cached
 metadata sort orders still merge over the full order during small patches, including

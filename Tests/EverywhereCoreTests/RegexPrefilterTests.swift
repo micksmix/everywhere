@@ -55,6 +55,72 @@ final class RegexPrefilterTests: XCTestCase {
         }
     }
 
+    func testRegexCandidateKeysAndRepeatedSortsPreserveDiskParity() throws {
+        try fixture { database, tree in
+            for group in 0..<4 {
+                for (number, name) in ["Report.txt", "report.txt", ".report.txt", "report.md", "other.txt", "Kelvin.txt"].enumerated() {
+                    try tree.add(path: "/group\(group)/" + name, size: Int64(group * 10 + number), modified: Double(number))
+                }
+                try tree.add(path: "/folders\(group)/report.txt", isDir: true)
+            }
+            let scope = SearchScope(name: "Selected reports", folders: ["/group1", "/group3"], expression: "Report size:>=20B | other ext:txt")
+            var requests: [SearchRequest] = []
+            for selectedScope in [nil, scope] {
+                for pattern in ["report", "^report", "txt$", "never-matches"] {
+                    for kind in KindFilter.allCases {
+                        for includeHidden in [false, true] {
+                            for matchCase in [false, true] {
+                                for sort in SortKey.allCases {
+                                    for ascending in [false, true] {
+                                        requests.append(SearchRequest(text: pattern, kind: kind, includeHidden: includeHidden, useRegex: true,
+                                                                      matchCase: matchCase, sortKey: sort, ascending: ascending, limit: 3, offset: 1,
+                                                                      scope: selectedScope))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let expected = try requests.map { try database.search($0, useMemory: false) }
+            for _ in 0..<2 {
+                for (request, disk) in zip(requests, expected) {
+                    let memory = try database.search(request, useMemory: true)
+                    XCTAssertEqual(memory.entries, disk.entries, "\(request)")
+                    XCTAssertEqual(memory.total, disk.total, "\(request)")
+                }
+            }
+        }
+    }
+
+    func testRegexCandidatesInvalidateForLocalAndExternalWrites() throws {
+        try fixture { database, tree in
+            for number in 0..<8 { try tree.add(path: "/reports/report-\(number).txt", size: Int64(number)) }
+            let scope = SearchScope(name: "Large", expression: "size:>=4B")
+            var request = SearchRequest(text: "^report", kind: .files, useRegex: true, limit: 3, scope: scope)
+            let initial = try database.search(request, useMemory: true)
+            XCTAssertEqual(initial.total, 4)
+            request.offset = 3
+            XCTAssertEqual(try database.search(request, useMemory: true).entries.count, 1)
+            let parent = try XCTUnwrap(tree.id(for: "/reports"))
+            let id = try XCTUnwrap(tree.id(for: "/reports/report-0.txt"))
+            try database.insert(rows: [IndexRow(id: id, parent: parent, name: "report-0.txt", isDir: false, size: 9, modified: 0)])
+            let patched = try database.search(request, useMemory: true)
+            XCTAssertEqual(patched.total, 5)
+            XCTAssertEqual(patched.entries.count, 2)
+            XCTAssertEqual(patched.cacheStatistics.fullLoads, initial.cacheStatistics.fullLoads)
+            XCTAssertGreaterThan(patched.cacheStatistics.incrementalRefreshes, initial.cacheStatistics.incrementalRefreshes)
+            let external = try Database(path: database.path)
+            try external.insert(rows: [IndexRow(id: external.nextID(), parent: parent, name: "report-external.txt", isDir: false, size: 10, modified: 0)])
+            let refreshed = try database.search(request, useMemory: true)
+            XCTAssertEqual(refreshed.total, 6)
+            XCTAssertEqual(refreshed.entries.count, 3)
+            XCTAssertGreaterThan(refreshed.cacheStatistics.fullLoads, patched.cacheStatistics.fullLoads)
+            let disk = try database.search(request, useMemory: false)
+            XCTAssertEqual(refreshed.entries, disk.entries)
+        }
+    }
+
     private func fixture(_ body: (Database, TestTree) throws -> Void) throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("everywhere-regex-prefilter-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

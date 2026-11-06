@@ -22,9 +22,14 @@ final class FilenameIndex {
         let ascending: Bool
     }
     private var sortOrders: [Ordering: [UInt32]] = [:]
+    private var nameRunEnds: [Ordering: [UInt32]] = [:]
     private var recentOrders: [Ordering] = []
+    private enum CandidateQuery: Equatable {
+        case name(ParsedQuery)
+        case regex(String, ParsedQuery?)
+    }
     private var previousRequest: SearchRequest?
-    private var previousQuery: ParsedQuery?
+    private var previousQuery: CandidateQuery?
     private var previousFilters: [[FilterQuery.Filter]]?
     private var previousTerms: [String]?
     private var previousMatches: [UInt32] = []
@@ -44,7 +49,7 @@ final class FilenameIndex {
             + folderScopes.reduce(0) { $0 + $1.value.storageBytes + $1.key.paths.reduce(0) { $0 + $1.utf8.count } }
         return SearchCacheStatistics(itemCount: rows.count - deadRows,
                               storageBytes: rows.capacity * MemoryLayout<Row>.stride + names.capacity + (idOrder.capacity + previousMatches.capacity) * MemoryLayout<UInt32>.stride + scopeBytes,
-                              sortBytes: sortOrders.values.reduce(0) { $0 + $1.capacity * MemoryLayout<UInt32>.stride },
+                              sortBytes: (sortOrders.values.reduce(0) { $0 + $1.capacity } + nameRunEnds.values.reduce(0) { $0 + $1.capacity }) * MemoryLayout<UInt32>.stride,
                               sortCount: sortOrders.count)
     }
 
@@ -113,12 +118,74 @@ final class FilenameIndex {
         let ordering = Ordering(key: key, ascending: ascending)
         if sortOrders[ordering] != nil { return }
         let sorted = try sortedIndices(idOrder, ordering: ordering, cancellation: cancellation, pathIndex: pathIndex)
+        let runs = ordering.key == .name ? try repeatedNameRunEnds(in: sorted, cancellation: cancellation) : nil
         if recentOrders.count == 3, let oldest = recentOrders.first {
             sortOrders[oldest] = nil
+            nameRunEnds[oldest] = nil
             recentOrders.removeFirst()
         }
         recentOrders.append(ordering)
         sortOrders[ordering] = sorted
+        nameRunEnds[ordering] = runs
+    }
+
+    private func repeatedNameRunEnds(in order: [UInt32], cancellation: SearchCancellation?) throws -> [UInt32]? {
+        guard repeatedNames, !order.isEmpty else { return nil }
+        let maximumRuns = order.count / 8
+        var ends: [UInt32] = []
+        var previousOffset = rows[order[0]].nameOffset
+        for position in order.indices {
+            if position % 1024 == 0 { try cancellation?.check() }
+            let offset = rows[order[position]].nameOffset
+            if offset != previousOffset {
+                guard ends.count < maximumRuns else { return nil }
+                ends.append(UInt32(position))
+                previousOffset = offset
+            }
+        }
+        guard ends.count < maximumRuns else { return nil }
+        ends.append(UInt32(order.count))
+        return ends
+    }
+
+    private func selectNameRuns(request: SearchRequest, filters: RowFilterMatcher? = nil, cancellation: SearchCancellation?,
+                                matchesName: (Row, UnsafeBufferPointer<UInt8>) -> Bool) throws -> (matches: [UInt32], ordering: Ordering)? {
+        let requested = Ordering(key: request.sortKey, ascending: request.ascending)
+        let available = [requested, Ordering(key: .name, ascending: true), Ordering(key: .name, ascending: false)]
+        guard let ordering = available.first(where: { nameRunEnds[$0] != nil }),
+              let ends = nameRunEnds[ordering], let order = sortOrders[ordering] else { return nil }
+        recentOrders.removeAll { $0 == ordering }
+        recentOrders.append(ordering)
+        var matches: [UInt32] = []
+        var nameMatches: [Int: Bool] = [:]
+        try names.withUnsafeBufferPointer { bytes in
+            var start = 0
+            for (run, endValue) in ends.enumerated() {
+                if run % 256 == 0 { try cancellation?.check() }
+                let end = Int(endValue)
+                defer { start = end }
+                let representative = rows[order[start]]
+                guard request.includeHidden || bytes[representative.nameOffset] != 46 else { continue }
+                var matched = nameMatches[representative.nameOffset]
+                if matched == false { continue }
+                for position in start..<end {
+                    if (position - start) % 256 == 0 { try cancellation?.check() }
+                    let index = order[position]
+                    let row = rows[index]
+                    guard request.kind != .files || !row.isDirectory,
+                          request.kind != .folders || row.isDirectory else { continue }
+                    if let filters, !filters.matches(row, bytes: bytes) { continue }
+                    if matched == nil {
+                        let name = UnsafeBufferPointer(start: bytes.baseAddress!.advanced(by: row.nameOffset), count: Int(row.nameLength))
+                        matched = matchesName(row, name)
+                        nameMatches[row.nameOffset] = matched
+                    }
+                    guard matched == true else { break }
+                    matches.append(index)
+                }
+            }
+        }
+        return (matches, ordering)
     }
 
     func folderScope(for key: FolderScope.Key, cancellation: SearchCancellation?, load: () throws -> FolderScope) throws -> FolderScope {
@@ -181,10 +248,8 @@ final class FilenameIndex {
         let filters = filteredGroups?.map(\.filters)
         var reuse = false
         var identical = false
-        if let previous = previousRequest, previousFilters == filters, previous.scope == request.scope,
-           previous.kind == request.kind, previous.includeHidden == request.includeHidden,
-           previous.matchCase == request.matchCase, previous.wholeWord == request.wholeWord {
-            identical = previousQuery == parsed
+        if canReuseCandidates(for: request, filters: filters) {
+            identical = previousQuery == .name(parsed)
             if identical {
                 reuse = true
             } else if let old = previousTerms, let new = query.literalTerms {
@@ -192,8 +257,14 @@ final class FilenameIndex {
             }
         }
         var matches: [UInt32] = []
+        var scannedOrdering: Ordering?
         if identical {
             matches = previousMatches
+        } else if !reuse, let selected = try selectNameRuns(request: request, cancellation: cancellation, matchesName: { row, name in
+            (!row.isASCII || query.mayMatch(mask: row.mask)) && query.matches(bytes: name, isASCII: row.isASCII)
+        }) {
+            matches = selected.matches
+            scannedOrdering = selected.ordering
         } else {
             let candidates = reuse ? previousMatches : idOrder
             var nameMatches: [Int: Bool] = [:]
@@ -221,11 +292,11 @@ final class FilenameIndex {
                                           namesAlreadyMatched: true, cancellation: cancellation)
         }
         let ordering = Ordering(key: request.sortKey, ascending: request.ascending)
-        let alreadySorted = reuse && previousRequest?.sortKey == request.sortKey && previousRequest?.ascending == request.ascending
+        let alreadySorted = scannedOrdering == ordering || (reuse && previousRequest?.sortKey == request.sortKey && previousRequest?.ascending == request.ascending)
         matches = try applyingOrder(matches, ordering: ordering, alreadySorted: alreadySorted, cancellation: cancellation, pathIndex: pathIndex)
         try cancellation?.check()
         previousRequest = request
-        previousQuery = parsed
+        previousQuery = .name(parsed)
         previousFilters = filters
         previousTerms = query.literalTerms
         previousMatches = matches
@@ -236,40 +307,71 @@ final class FilenameIndex {
     func selectRegex(request: SearchRequest, cancellation: SearchCancellation?, filteredGroups: [FilterQuery.Group]? = nil,
                      folderFilters: [[FolderScope.Filter]] = [],
                      literal: String?, pathIndex: () throws -> PathSortIndex, matchesRegex: (String) -> Bool) throws -> (rows: [(Row, String)], total: Int) {
-        let prefilter = literal.map { NameQuery(literal: $0, matchCase: request.matchCase) }
-        let filters = filteredGroups.map { RowFilterMatcher(groups: $0, folderFilters: folderFilters, request: request, namesAlreadyMatched: false) }
+        let parsed = filteredGroups.map { ParsedQuery(groups: $0.map { ParsedGroup(terms: $0.terms) }) }
+        let query = CandidateQuery.regex(request.text, parsed)
+        let filters = filteredGroups?.map(\.filters)
+        let identical = canReuseCandidates(for: request, filters: filters) && previousQuery == query
         var matches: [UInt32] = []
-        var nameMatches: [Int: Bool] = [:]
-        try names.withUnsafeBufferPointer { bytes in
-            for (offset, index) in idOrder.enumerated() {
-                if offset % 256 == 0 { try cancellation?.check() }
-                let row = rows[index]
-                guard request.includeHidden || bytes[row.nameOffset] != 46,
-                      request.kind != .files || !row.isDirectory,
-                      request.kind != .folders || row.isDirectory else { continue }
-                if row.isASCII, let prefilter, !prefilter.mayMatch(mask: row.mask) { continue }
-                let cachedMatch = repeatedNames ? nameMatches[row.nameOffset] : nil
-                if cachedMatch == false { continue }
-                let nameBytes = UnsafeBufferPointer(start: bytes.baseAddress!.advanced(by: row.nameOffset), count: Int(row.nameLength))
-                if cachedMatch == nil, row.isASCII, let prefilter, !prefilter.matches(bytes: nameBytes, isASCII: true) {
-                    if repeatedNames { nameMatches[row.nameOffset] = false }
-                    continue
+        var scannedOrdering: Ordering?
+        if identical {
+            matches = previousMatches
+        } else {
+            let prefilter = literal.map { NameQuery(literal: $0, matchCase: request.matchCase) }
+            let rowFilters = filteredGroups.map { RowFilterMatcher(groups: $0, folderFilters: folderFilters, request: request, namesAlreadyMatched: false) }
+            if let selected = try selectNameRuns(request: request, filters: rowFilters, cancellation: cancellation, matchesName: { row, name in
+                if row.isASCII, let prefilter, !prefilter.mayMatch(mask: row.mask) || !prefilter.matches(bytes: name, isASCII: true) { return false }
+                return matchesRegex(String(decoding: name, as: UTF8.self))
+            }) {
+                matches = selected.matches
+                scannedOrdering = selected.ordering
+            } else {
+                var nameMatches: [Int: Bool] = [:]
+                try names.withUnsafeBufferPointer { bytes in
+                    for (offset, index) in idOrder.enumerated() {
+                        if offset % 256 == 0 { try cancellation?.check() }
+                        let row = rows[index]
+                        guard request.includeHidden || bytes[row.nameOffset] != 46,
+                              request.kind != .files || !row.isDirectory,
+                              request.kind != .folders || row.isDirectory else { continue }
+                        if row.isASCII, let prefilter, !prefilter.mayMatch(mask: row.mask) { continue }
+                        let cachedMatch = repeatedNames ? nameMatches[row.nameOffset] : nil
+                        if cachedMatch == false { continue }
+                        let nameBytes = UnsafeBufferPointer(start: bytes.baseAddress!.advanced(by: row.nameOffset), count: Int(row.nameLength))
+                        if cachedMatch == nil, row.isASCII, let prefilter, !prefilter.matches(bytes: nameBytes, isASCII: true) {
+                            if repeatedNames { nameMatches[row.nameOffset] = false }
+                            continue
+                        }
+                        if let rowFilters, !rowFilters.matches(row, bytes: bytes) { continue }
+                        if cachedMatch == true {
+                            matches.append(index)
+                            continue
+                        }
+                        let matched = matchesRegex(String(decoding: nameBytes, as: UTF8.self))
+                        if repeatedNames { nameMatches[row.nameOffset] = matched }
+                        if matched { matches.append(index) }
+                    }
                 }
-                if let filters, !filters.matches(row, bytes: bytes) { continue }
-                if cachedMatch == true {
-                    matches.append(index)
-                    continue
-                }
-                let matched = matchesRegex(String(decoding: nameBytes, as: UTF8.self))
-                if repeatedNames { nameMatches[row.nameOffset] = matched }
-                if matched { matches.append(index) }
             }
         }
         let ordering = Ordering(key: request.sortKey, ascending: request.ascending)
-        let ordered = try applyingOrder(matches, ordering: ordering, alreadySorted: false, cancellation: cancellation, pathIndex: pathIndex)
+        let alreadySorted = scannedOrdering == ordering || (identical && previousRequest?.sortKey == request.sortKey && previousRequest?.ascending == request.ascending)
+        matches = try applyingOrder(matches, ordering: ordering, alreadySorted: alreadySorted, cancellation: cancellation, pathIndex: pathIndex)
         try cancellation?.check()
-        let page = ordered.dropFirst(max(0, request.offset)).prefix(max(1, min(request.limit, 100_000)))
-        return (page.map { (rows[$0], name(for: rows[$0])) }, ordered.count)
+        previousRequest = request
+        previousQuery = query
+        previousFilters = filters
+        previousTerms = nil
+        previousMatches = matches
+        let page = matches.dropFirst(max(0, request.offset)).prefix(max(1, min(request.limit, 100_000)))
+        return (page.map { (rows[$0], name(for: rows[$0])) }, matches.count)
+    }
+
+    private func canReuseCandidates(for request: SearchRequest, filters: [[FilterQuery.Filter]]?) -> Bool {
+        guard let previous = previousRequest else { return false }
+        return previousFilters == filters && previous.scope == request.scope && previous.kind == request.kind
+            && previous.includeHidden == request.includeHidden && previous.matchCase == request.matchCase
+            && previous.wholeWord == request.wholeWord && previous.matchPath == request.matchPath
+            && previous.useRegex == request.useRegex
     }
 
     private struct RowFilterMatcher {
@@ -445,7 +547,10 @@ final class FilenameIndex {
             }
             let sorted = try sortedIndices(live, ordering: ordering, cancellation: cancellation, pathIndex: pathIndex, reuseNameOrder: false)
             let paths = ordering.key == .path ? try pathIndex() : nil
-            sortOrders[ordering] = try merged(retained, sorted, cancellation: cancellation) { less($0, $1, ordering: ordering, paths: paths) }
+            let order = try merged(retained, sorted, cancellation: cancellation) { less($0, $1, ordering: ordering, paths: paths) }
+            let runs = ordering.key == .name ? try repeatedNameRunEnds(in: order, cancellation: cancellation) : nil
+            sortOrders[ordering] = order
+            nameRunEnds[ordering] = runs
         }
     }
 

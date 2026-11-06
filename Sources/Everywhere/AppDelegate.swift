@@ -66,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func activateWindowMode() {
         let changed = NSApp.activationPolicy() != .regular
         if changed { NSApp.setActivationPolicy(.regular) }
+        NSApp.unhide(nil)
         NSApp.activate(ignoringOtherApps: true)
         if changed {
             DispatchQueue.main.async {
@@ -156,7 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let window = mainWindow, NSApp.windows.contains(window),
            !closingWindows.contains(window), !NSApp.isHidden,
            window.isVisible, !window.isMiniaturized {
-            window.miniaturize(nil)
+            minimizeMainWindow()
         } else {
             showMainWindow()
         }

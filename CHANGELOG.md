@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.14.0
+
+- Make the menu bar icon minimize the search window back to the menu bar, not the Dock, and reliably restore it on the next click.
+- Speed up repeated-name searches and reuse completed regex matches across pages and sort changes, with bounded caches and regression tests.
+- Add native file copying with **⌘C** and path copying with **⇧⌘C** in results, preserving search-field text copying.
+
 ## 1.13.0
 
 - Make Return in the search field select the first result and focus the list without opening anything; use arrow keys to navigate and Return again to open ([#5](https://github.com/micksmix/everywhere/issues/5)).

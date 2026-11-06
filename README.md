@@ -12,8 +12,8 @@ that indexes filenames and metadata, so you can find files without searching the
 - **Saved scopes:** fast index-only filtering of named folder sets and reusable search expressions, with pinned favorites and a default scope.
 - **Offline volumes:** classify local, network, and removable locations; optionally retain disconnected indexes and refresh them on reconnection.
 - **Native results:** sortable columns even before searching, saved layouts, highlighted matches, and Quick Look previews.
-- **File actions:** open, reveal in Finder, Get Info, Open With, Open in Terminal, and copy names or paths.
-- **Easy access:** menu bar icon that toggles between opening/restoring and minimizing the window, recordable global shortcut including punctuation (default **⌥Space**), and launch at login.
+- **File actions:** open, reveal in Finder, Get Info, Open With, Open in Terminal, and copy files, names, or paths. With results focused, **⌘C** copies selected files for Finder Paste and **⇧⌘C** copies their paths; search-field text copying stays native.
+- **Easy access:** menu bar icon that opens/restores the window or minimizes it back to the menu bar, not the Dock; recordable global shortcut including punctuation (default **⌥Space**); and launch at login.
 - **Fresh results:** low-overhead, batched file-level live updates, catch-up after the app was closed, and optional daily, weekly, or monthly full checks. Live Updates switches remember your choice during startup and scans.
 - **Indexing controls:** choose folders and exclusions, pause or resume scans, and search the saved index immediately. Background scans use limited parallelism instead of saturating every CPU core.
 - **macOS conveniences:** search history, offline help, light/dark appearance, and built-in updates.
